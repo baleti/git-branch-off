@@ -1,0 +1,274 @@
+#+title: git-branch-off
+#+author: baleti
+
+A Magit toolkit for parking experimental commits outside any branch, navigating
+them in a topological log view, squashing them together, and opening detached
+worktrees at specific points in history.
+
+* The Problem
+
+You are coding and a tangential idea surfaces — an alternative algorithm, an
+exploratory refactor, a note-to-self.  The standard options all require
+interrupting your flow:
+
+- Create a branch → context-switch, pollutes the branch list
+- Stash → breaks your mental stack, hard to browse later
+- WIP commit on current branch → taints history, must be cleaned up
+
+The real intent is: /keep the code somewhere safe, out of the way, and easy to
+revisit later — without switching what you are working on./
+
+* Core Concept: =refs/branch-off/<hash>=
+
+A /branch-off commit/ is an ordinary git commit stored under a special ref
+namespace (=refs/branch-off/<full-hash>=) rather than under any branch.  The
+parent chain is preserved so it anchors correctly in the DAG, but the commit
+is invisible to normal =git log= and does not move any branch pointer.
+
+The key operation is =git-branch-off-stage-and-commit-branch-off=:
+
+1. You select newly-added lines in a file buffer (evil visual or region).
+2. The command stages only those lines (line-precision patch), commits them,
+   stores the commit under =refs/branch-off/<hash>=, then rewinds HEAD with
+   =--mixed= and removes the lines from the working tree.
+3. Result: the lines are gone from your working tree and from the index, but
+   the commit is safely parked and reachable.
+
+#+begin_example
+Before:
+
+  app.py (modified, in buffer)
+  ──────────────────────────────
+   1  def main(): pass
+   2  def helper(): pass
+   3  def experimental(): pass   ← select this line, run SPC g c o
+   4  def util(): pass
+
+After git-branch-off-stage-and-commit-branch-off:
+
+  app.py (working tree)            refs/branch-off/23cab67
+  ──────────────────────────────   ──────────────────────────────────────
+   1  def main(): pass             commit 23cab67
+   2  def helper(): pass           Author: alice
+   4  def util(): pass             "draft: experimental approach to the API"
+                                   +def experimental(): pass
+#+end_example
+
+* Log View
+
+=git-branch-off-log= (=M-x git-branch-off-log= or =SPC g l l=) opens a Magit
+log with =--all= and =--topo-order= showing every commit reachable from any
+ref, including branch-offs.  The =git-branch-off--log-mark= hook fires after
+each refresh and adds overlays:
+
+- Indentation (2 spaces per depth level) on branch-off commits
+- =@= prefix in cyan on commits that have a live detached worktree
+
+#+begin_example
+  git-branch-off log view (SPC g l l)
+  ════════════════════════════════════════════════════════════════
+  ea8024b  add project notes                       (main)
+    14bd025  draft: naive caching layer             (branch-off/14bd025...)
+  @ 080ef4d  draft: LRU eviction for cache          (branch-off/080ef4d...)
+  71ba183  add utility helpers
+    23cab67  draft: experimental approach to API    (branch-off/23cab67...)
+  7321180  add helper function
+  80df423  add application skeleton
+  9f383bb  initial commit
+  ════════════════════════════════════════════════════════════════
+
+  @ = worktree is open at this commit (shown in cyan)
+  indent depth = nesting level within refs/branch-off/ ancestry
+#+end_example
+
+Reading the log: the two-space-indented commits (14bd025, 23cab67) are
+depth-1 branch-offs — each parented directly on a main-branch commit.
+The four-space-indented commit (080ef4d) is depth 2 because its parent
+(14bd025) is itself a branch-off.  The =@= shows that a worktree is
+currently open at that exact state.
+
+Navigation in the log: =n= / =p= move between commits and instantly show a
+side-by-side diff preview without leaving the log buffer.
+
+* Commands
+
+** Stage / Commit
+
+| Command                                | Default binding | Description                                                                   |
+|----------------------------------------+-----------------+-------------------------------------------------------------------------------|
+| =git-branch-off-stage-and-commit=      | =SPC g c c=     | Stage selected lines (line-precision), open commit editor                     |
+| =git-branch-off-stage-and-commit-branch-off= | =SPC g c o= | Stage selected additions, commit to =refs/branch-off/=, rewind HEAD, remove lines |
+
+Both commands require an active region in a file buffer.
+=stage-and-commit= stages only the =+= lines inside the selection and then
+calls =magit-commit-create=.  =stage-and-commit-branch-off= additionally
+enforces that the selection contains only pure additions (no modifications or
+deletions) before parking the commit.
+
+** Log / Navigation
+
+| Command                          | Default binding | Description                                                     |
+|----------------------------------+-----------------+-----------------------------------------------------------------|
+| =git-branch-off-log=             | =SPC g l l=     | Open topological log of all refs with depth-indented branch-offs |
+| =git-branch-off-revision-next=   | =n= in revision | Move to next commit in log and preview diff                     |
+| =git-branch-off-revision-prev=   | =p= in revision | Move to previous commit in log and preview diff                 |
+| =git-branch-off-status-next=     | =n= in status   | Move to next section, preview any commit at point              |
+| =git-branch-off-status-prev=     | =p= in status   | Move to previous section, preview any commit at point          |
+| =git-branch-off-status-tab=      | =TAB= in status | Visit commit (not section-toggle) on commit sections           |
+
+** Worktrees
+
+| Command                          | Default binding | Description                                                     |
+|----------------------------------+-----------------+-----------------------------------------------------------------|
+| =git-branch-off-worktree-create= | =SPC g w c=     | Create detached worktree at =.worktree/<hash>=                  |
+| =git-branch-off-worktree-delete= | =SPC g w d=     | Delete worktree(s) interactively or from log marks             |
+
+=worktree-create= is context-sensitive:
+- In =magit-log=: creates worktree for commit at point, opens dired there
+- In =magit-revision= / =magit-blob=: uses the buffer's revision
+- In a file buffer: opens the log in pick mode — press =RET= on any commit
+  to create the worktree and open the same file at that historical state
+
+=worktree-delete= from a log buffer targets commits selected via marks, visual
+region, or point.  Otherwise it opens an interactive buffer with =m= to mark,
+=C-c C-c= to confirm deletion, =C-g= to abort.
+
+** Squash / Reword / Remove
+
+These are exposed through the Magit rebase transient (=r= in a log or status buffer):
+
+| Suffix  | Command                   | Description                                    |
+|---------+---------------------------+------------------------------------------------|
+| =W=     | =git-branch-off-reword=   | Reword a commit message, cascade branch-offs   |
+| =K=     | =git-branch-off-remove=   | Remove one or more commits, cascade branch-offs |
+| =S=     | =git-branch-off-squash=   | Squash marked commits into one                 |
+
+=git-branch-off-mark= (=m= or =M= in the log, =M= in the merge transient) marks
+commits for squash.  Mark multiple with evil visual mode then =m=.
+
+** Hunk Staging Helpers
+
+| Command                              | Default binding | Description                                               |
+|--------------------------------------+-----------------+-----------------------------------------------------------|
+| =git-branch-off-amend-hunk=          | =SPC g a a=     | Stage hunk(s) at point/selection and amend previous commit |
+| =git-branch-off-amend-hunk-no-edit=  | =SPC g a n=     | Same but reuse existing message (=magit-commit-extend=)   |
+| =git-branch-off-select-hunk=         | —               | Select the diff hunk under point as evil visual region    |
+
+** Search (requires =consult=)
+
+| Command                                   | Default binding | Description                                     |
+|-------------------------------------------+-----------------+-------------------------------------------------|
+| =git-branch-off-search-filename-history=  | =SPC s g f=     | Commits that added/removed a file               |
+| =git-branch-off-search-pickaxe-g=        | =SPC s g g=     | Commits where a line matching regex changed     |
+| =git-branch-off-search-pickaxe-s=        | =SPC s g S=     | Commits where a literal string count changed    |
+| =git-branch-off-search-all-grep=         | =SPC s g a=     | =git grep= across every committed blob          |
+
+All search commands use consult's async preview: navigate the candidates and
+the matching line in the historical commit is shown immediately.
+
+* Installation
+
+** Doom Emacs
+
+#+begin_src emacs-lisp
+;; packages.el
+(package! git-branch-off
+  :recipe (:host github :repo "baleti/git-branch-off"
+           :branch "main"
+           :depth full))
+#+end_src
+
+#+begin_src emacs-lisp
+;; config.el
+(use-package! git-branch-off
+  :after magit
+  :config
+  (git-branch-off-setup)
+  ;; leader keybindings (adjust to taste)
+  (map! :leader
+        "g c c" #'git-branch-off-stage-and-commit
+        "g c o" #'git-branch-off-stage-and-commit-branch-off
+        "g l l" #'git-branch-off-log
+        (:prefix ("g w" . "worktree")
+         "c" #'git-branch-off-worktree-create
+         "d" #'git-branch-off-worktree-delete)
+        (:prefix ("g a" . "amend hunk")
+         "a" #'git-branch-off-amend-hunk
+         "n" #'git-branch-off-amend-hunk-no-edit)
+        "s g f" #'git-branch-off-search-filename-history
+        "s g g" #'git-branch-off-search-pickaxe-g
+        "s g S" #'git-branch-off-search-pickaxe-s
+        "s g a" #'git-branch-off-search-all-grep))
+#+end_src
+
+** Vanilla Emacs / use-package
+
+#+begin_src emacs-lisp
+;; with straight.el
+(straight-use-package
+ '(git-branch-off :host github :repo "baleti/git-branch-off"
+                  :branch "main"))
+
+(use-package git-branch-off
+  :after magit
+  :config
+  (git-branch-off-setup)
+  ;; bind commands wherever you like, e.g.:
+  (with-eval-after-load 'magit
+    (define-key magit-status-mode-map (kbd "C-c o") #'git-branch-off-stage-and-commit-branch-off)
+    (define-key magit-log-mode-map    (kbd "C-c l") #'git-branch-off-log)))
+#+end_src
+
+** package-vc (Emacs 30+)
+
+#+begin_src emacs-lisp
+(package-vc-install
+ '(git-branch-off :url "https://github.com/baleti/git-branch-off"
+                  :branch "main"))
+#+end_src
+
+* Dependencies
+
+| Package  | Required | Notes                                       |
+|----------+----------+---------------------------------------------|
+| =magit=  | yes      | Core dependency for all commands            |
+| =evil=   | optional | Setup applied automatically when present   |
+| =consult= | optional | Required only for the four search commands |
+
+The package itself contains no doom-specific macros.  All mode-map bindings
+and hooks are installed via =git-branch-off-setup= using standard Emacs APIs.
+The setup function wraps evil-specific bindings in =(with-eval-after-load 'evil ...)=
+so they are silently skipped in a vanilla Emacs session.
+
+* Face Customisation
+
+The squash-mark face has no colour by default so it does not clash with any
+theme.  Customise it to match your palette:
+
+#+begin_src emacs-lisp
+;; Example for doom-one (put in config.el, after doom-themes loads)
+(after! doom-themes
+  (custom-set-faces!
+    `(git-branch-off-squash-marked
+      :background ,(doom-blend (doom-color 'orange) (doom-color 'bg) 0.25)
+      :extend t)))
+#+end_src
+
+* Development
+
+The package is developed directly in the straight.el clone directory.  On a
+Doom Emacs machine:
+
+#+begin_example
+~/.config/emacs/.local/straight/repos/git-branch-off/
+#+end_example
+
+Uncommitted changes in this directory are automatically skipped by
+=doom upgrade= / =doom sync=, so the nightly crontab update does not
+interfere with active development.
+
+Run tests:
+
+#+begin_src shell
+cd test && ./run-tests.sh
+#+end_src
