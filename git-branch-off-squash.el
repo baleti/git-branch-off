@@ -1,5 +1,6 @@
 ;;; git-branch-off-squash.el --- Squash commits  -*- lexical-binding: t; -*-
 
+(eval-when-compile (require 'transient))
 (require 'git-branch-off-reword)
 
 ;;; Mark system
