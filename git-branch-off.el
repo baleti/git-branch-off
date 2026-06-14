@@ -61,7 +61,7 @@
      [("W" "reword" git-branch-off-reword)
       ("K" "remove" git-branch-off-remove)
       ("S" "squash" git-branch-off-squash)]
-     [("v" git-branch-off-squash-verbose)]])
+     [("v" "show diff in edit buffer" git-branch-off-squash-verbose)]])
   (ignore-errors (transient-remove-suffix 'magit-merge "M"))
   (transient-append-suffix 'magit-merge '(1)
     ["Branch Off"

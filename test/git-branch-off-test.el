@@ -337,16 +337,18 @@ The repository is removed on exit."
         (call-process "git" nil nil nil "update-ref"
                       (format "refs/branch-off/%s" bo-hash) bo-hash)
         (call-process "git" nil nil nil "checkout" "-q" base)
-        ;; Normal log should not mention the branch-off commit
+        ;; Normal log should not mention the branch-off commit.
+        ;; Use --format=%H to get full hashes rather than relying on the
+        ;; git-version-dependent abbreviated length of --oneline.
         (let ((log (with-temp-buffer
-                     (call-process "git" nil t nil "log" "--oneline")
+                     (call-process "git" nil t nil "log" "--format=%H")
                      (buffer-string))))
-          (should-not (string-match-p (substring bo-hash 0 8) log)))
+          (should-not (string-match-p bo-hash log)))
         ;; --all log should mention it
         (let ((log-all (with-temp-buffer
-                         (call-process "git" nil t nil "log" "--all" "--oneline")
+                         (call-process "git" nil t nil "log" "--all" "--format=%H")
                          (buffer-string))))
-          (should (string-match-p (substring bo-hash 0 8) log-all)))))))
+          (should (string-match-p bo-hash log-all)))))))
 
 (provide 'git-branch-off-test)
 ;;; git-branch-off-test.el ends here
