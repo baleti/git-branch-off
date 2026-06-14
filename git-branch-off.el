@@ -41,7 +41,6 @@
 
 ;;; Code:
 
-(eval-when-compile (require 'evil nil t))
 (require 'git-branch-off-stage)
 (require 'git-branch-off-commit)
 (require 'git-branch-off-log)
@@ -90,26 +89,28 @@ Call this from your config after magit is loaded, e.g.:
   (with-eval-after-load 'magit-diff
     (define-key magit-revision-mode-map (kbd "TAB") #'magit-diff-visit-file))
 
-  ;; Evil state bindings (override motion/normal state keys in magit maps)
+  ;; Evil state bindings (override motion/normal state keys in magit maps).
+  ;; Use evil-define-key* (function) rather than evil-define-key (macro) so
+  ;; these compile correctly without evil on the byte-compiler's load-path.
   (with-eval-after-load 'evil
     (with-eval-after-load 'magit-log
-      (evil-define-key 'normal magit-log-mode-map
+      (evil-define-key* 'normal magit-log-mode-map
         (kbd "TAB") #'magit-visit-thing
         (kbd "m")   #'git-branch-off-mark
         (kbd "M")   #'git-branch-off-mark))
     (with-eval-after-load 'magit-status
-      (evil-define-key 'normal magit-status-mode-map
+      (evil-define-key* 'normal magit-status-mode-map
         (kbd "TAB") #'git-branch-off-status-tab)
-      (evil-define-key 'motion magit-status-mode-map
+      (evil-define-key* 'motion magit-status-mode-map
         (kbd "n") #'git-branch-off-status-next
         (kbd "p") #'git-branch-off-status-prev))
     (with-eval-after-load 'magit-diff
-      (evil-define-key 'normal magit-revision-mode-map
+      (evil-define-key* 'normal magit-revision-mode-map
         (kbd "TAB") #'magit-diff-visit-file
         (kbd "n")   #'git-branch-off-revision-next
         (kbd "p")   #'git-branch-off-revision-prev))
     (with-eval-after-load 'magit-blob
-      (evil-define-key 'normal magit-blob-mode-map
+      (evil-define-key* 'normal magit-blob-mode-map
         (kbd "n") #'git-branch-off-blob-next
         (kbd "p") #'git-branch-off-blob-prev)))
 
