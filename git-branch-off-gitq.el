@@ -996,5 +996,365 @@ Examples:
     (unless (string-empty-p (string-trim p))
       (gitq p))))
 
+;;; Flat-syntax pipeline parser (whitespace-separated stages, /terminal keywords)
+;;
+;; Grammar:
+;;   pipeline ::= source step* terminal?
+;;   source   ::= "commits" ["in" range-tokens] | "HEAD" | BRANCH
+;;               | "branches" | "tags" | "refs" | "worktrees" | "blobs"
+;;   step     ::= "via" MORPHISM | "where" conditions | "grep" PATTERN
+;;               | "pickaxe" PATTERN ["regex"] | "path" GLOB
+;;               | "pick" .FIELD[,...] | "take" N | "skip" N
+;;               | "first" | "last" | "sort" ["-"].FIELD
+;;   terminal ::= "/show" | "/copy" | "/insert" | "/count" | "/branch-off" [NAME]
+;;               | "/amend" ["no-edit"|MSG] | "/squash" [MSG] | "/reword" [MSG]
+;;               | "/remove" | "/delete" | "/commit" [MSG] | "/stage"
+;;               | "/mark" [LABEL] | "/worktree"
+;;   conditions ::= condition ("," condition)*
+;;   condition  ::= "." FIELD [OP value]
+;;   value      ::= QUOTED | /REGEX/ | NUMBER | BARE-WORD (not a step keyword)
+;;
+;; Disambiguation rules:
+;;   1. Terminals start with / and have no closing /  (/show not /show/).
+;;      /regex/ literals have a closing / and cannot be terminals.
+;;   2. Step keywords (via where grep pickaxe path pick take skip first last sort)
+;;      always start a new stage; they are reserved and cannot appear as unquoted
+;;      values. Use quotes when searching for these literal strings:
+;;        where .message contains "take"   (not: where .message contains take)
+;;   3. Former terminal identifiers (commit show count remove stage mark …) are
+;;      now plain identifiers and can appear freely as where-clause values.
+;;   4. In "commits in RANGE", range tokens are consumed until a step keyword,
+;;      /terminal, or end of input. Branch names that are step keywords must be
+;;      quoted.
+
+(defconst gitq--flat-step-keywords
+  '("via" "where" "grep" "pickaxe" "path" "pick" "take" "skip" "first" "last" "sort")
+  "Reserved step keywords in flat-syntax pipelines.
+These always start a new stage; quote them when used as string values.")
+
+(defun gitq--tokenize-flat (str)
+  "Tokenize a flat pipeline STR.
+Like `gitq--tokenize' but distinguishes /command terminal tokens from
+/pattern/ regex literals by looking for a matching closing slash."
+  (let (tokens (i 0) (len (length str)))
+    (while (< i len)
+      (let ((c (aref str i)))
+        (cond
+         ((memq c '(?\s ?\t ?\n ?\r)) (setq i (1+ i)))
+         ((eq c ?\")
+          (let ((s i))
+            (setq i (1+ i))
+            (while (and (< i len) (not (eq (aref str i) ?\")))
+              (when (eq (aref str i) ?\\) (setq i (1+ i)))
+              (setq i (1+ i)))
+            (setq i (1+ i))
+            (push (substring str s i) tokens)))
+         ((eq c ?/)
+          ;; Scan forward to see if there is a matching closing /.
+          ;; Found  → /pattern/ regex literal.
+          ;; Absent → /command terminal token.
+          (let ((j (1+ i)))
+            (while (and (< j len) (not (eq (aref str j) ?/)))
+              (setq j (1+ j)))
+            (if (< j len)
+                ;; Regex literal: consume up to and including closing /
+                (progn (push (substring str i (1+ j)) tokens)
+                       (setq i (1+ j)))
+              ;; Command token: consume /alpha-chars
+              (let ((s i))
+                (setq i (1+ i))
+                (while (and (< i len)
+                            (let ((d (aref str i)))
+                              (or (and (>= d ?a) (<= d ?z))
+                                  (and (>= d ?A) (<= d ?Z))
+                                  (and (>= d ?0) (<= d ?9))
+                                  (memq d '(?- ?_)))))
+                  (setq i (1+ i)))
+                (push (substring str s i) tokens)))))
+         ((eq c ?,) (push "," tokens) (setq i (1+ i)))
+         ((and (< (1+ i) len)
+               (member (substring str i (+ i 2)) '("==" "!=" ">=" "<=")))
+          (push (substring str i (+ i 2)) tokens) (setq i (+ i 2)))
+         ((memq c '(?> ?<)) (push (string c) tokens) (setq i (1+ i)))
+         ((and (eq c ?-) (< (1+ i) len) (eq (aref str (1+ i)) ?.))
+          (let ((s i))
+            (setq i (+ i 2))
+            (while (and (< i len)
+                        (let ((d (aref str i)))
+                          (or (and (>= d ?a) (<= d ?z))
+                              (and (>= d ?A) (<= d ?Z))
+                              (and (>= d ?0) (<= d ?9))
+                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
+                              (eq d #x2020))))
+              (setq i (1+ i)))
+            (push (substring str s i) tokens)))
+         ((eq c ?.)
+          (let ((s i))
+            (setq i (1+ i))
+            (while (and (< i len)
+                        (let ((d (aref str i)))
+                          (or (and (>= d ?a) (<= d ?z))
+                              (and (>= d ?A) (<= d ?Z))
+                              (and (>= d ?0) (<= d ?9))
+                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
+                              (eq d #x2020))))
+              (setq i (1+ i)))
+            (push (substring str s i) tokens)))
+         ((and (>= c ?0) (<= c ?9))
+          (let ((s i))
+            (while (and (< i len) (>= (aref str i) ?0) (<= (aref str i) ?9))
+              (setq i (1+ i)))
+            (push (substring str s i) tokens)))
+         ((or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z)) (eq c ?_))
+          (let ((s i))
+            (while (and (< i len)
+                        (let ((d (aref str i)))
+                          (or (and (>= d ?a) (<= d ?z))
+                              (and (>= d ?A) (<= d ?Z))
+                              (and (>= d ?0) (<= d ?9))
+                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?})))))
+              (setq i (1+ i)))
+            (push (substring str s i) tokens)))
+         (t (setq i (1+ i))))))
+    (nreverse tokens)))
+
+(defun gitq--flat-step-p (tok)
+  "Return non-nil if TOK is a reserved step keyword in flat-syntax mode."
+  (member tok gitq--flat-step-keywords))
+
+(defun gitq--flat-terminal-p (tok)
+  "Return non-nil if TOK is a /command terminal token (not a /regex/ literal)."
+  (and (stringp tok)
+       (> (length tok) 1)
+       (eq (aref tok 0) ?/)
+       ;; A /regex/ ends with /; a /command does not
+       (not (eq (aref tok (1- (length tok))) ?/))))
+
+(defun gitq--flat-boundary-p (tok)
+  "Return non-nil if TOK is a stage boundary in flat-syntax mode."
+  (or (null tok)
+      (gitq--flat-step-p tok)
+      (gitq--flat-terminal-p tok)))
+
+(defun gitq--flat-parse-where (tokens)
+  "Parse where-conditions from flat TOKENS, returning (node . remaining).
+Step keywords and /terminals act as stage boundaries and are never consumed
+as condition values."
+  (let (conditions)
+    (while (and tokens (string-prefix-p "." (car tokens)))
+      (let* ((field-tok (pop tokens))
+             (field     (intern (replace-regexp-in-string
+                                 "\\." "-" (substring field-tok 1))))
+             (next      (car tokens)))
+        (cond
+         ;; Bare flag: next token is a boundary, comma, or another .field
+         ((or (null next) (equal next ",")
+              (string-prefix-p "." next)
+              (gitq--flat-boundary-p next))
+          (push (list :field field :op 'is :value t) conditions))
+         ;; Operator present
+         (t
+          (let* ((op-tok (pop tokens))
+                 (op     (intern op-tok))
+                 (next2  (car tokens)))
+            (cond
+             ;; Step keyword immediately after an operator that requires a value:
+             ;; this is always an error — the keyword must be quoted.
+             ((gitq--flat-step-p next2)
+              (error
+               "gitq: '%s' requires a value; step keyword '%s' must be quoted: \"%s\""
+               op-tok next2 next2))
+             ;; No value: nil, comma, dotted field, or /terminal after operator
+             ((or (null next2) (equal next2 ",")
+                  (string-prefix-p "." next2)
+                  (gitq--flat-terminal-p next2))
+              (push (list :field field :op op :value t) conditions))
+             ;; Normal value
+             (t
+              (let* ((val-tok (pop tokens))
+                     (val     (cond
+                               ((string-prefix-p "\"" val-tok) (gitq--unquote val-tok))
+                               ((string-prefix-p "/" val-tok)  (gitq--unregex val-tok))
+                               ((string-match-p "^[0-9]+$" val-tok)
+                                (string-to-number val-tok))
+                               (t val-tok))))
+                (push (list :field field :op op :value val) conditions))))))))
+      (when (equal (car tokens) ",") (pop tokens)))
+    (cons (list :type 'where :conditions (nreverse conditions)) tokens)))
+
+(defun gitq--flat-parse-source (tokens)
+  "Parse source node from flat TOKENS, returning (node . remaining)."
+  (let ((kw (pop tokens)))
+    (cond
+     ((member kw '("commits" "commit"))
+      (if (equal (car tokens) "in")
+          (let (range-parts)
+            (pop tokens)                  ; consume "in"
+            (while (and tokens (not (gitq--flat-boundary-p (car tokens))))
+              (push (pop tokens) range-parts))
+            (cons (list :type 'source :source 'commits
+                        :range (apply #'concat (nreverse range-parts)))
+                  tokens))
+        (cons (list :type 'source :source 'commits :range nil) tokens)))
+     ((equal kw "branches") (cons (list :type 'source :source 'branches) tokens))
+     ((equal kw "tags")     (cons (list :type 'source :source 'tags)     tokens))
+     ((member kw '("worktrees" "worktree"))
+      (cons (list :type 'source :source 'worktree) tokens))
+     ((equal kw "blobs")    (cons (list :type 'source :source 'blobs)    tokens))
+     ((equal kw "refs")     (cons (list :type 'source :source 'refs)     tokens))
+     (t (cons (list :type 'source :source 'ref :ref kw) tokens)))))
+
+(defun gitq--flat-parse-via (tokens)
+  "Parse via-step morphism from flat TOKENS, returning (node . remaining).
+Handles the optional REF argument of .diff without consuming step keywords."
+  (let* ((path (pop tokens))
+         (node (cond
+                ((equal path ".parent")   (list :type 'via :morphism 'parent))
+                ((equal path ".parent*")  (list :type 'via :morphism 'parent :star t))
+                ((equal path ".parent+")  (list :type 'via :morphism 'parent :plus t))
+                ((string-match "^\\.parent\\[\\([0-9]+\\)\\]$" path)
+                 (list :type 'via :morphism 'parent
+                       :index (string-to-number (match-string 1 path))))
+                ((or (equal path ".parent†") (equal path ".parent†"))
+                 (list :type 'via :morphism 'parent-adjoint))
+                ((equal path ".tree")     (list :type 'via :morphism 'tree))
+                ((string-match "^\\.tree\\.entries\\(?:\\[\\(Blob\\|Tree\\)\\]\\)?$" path)
+                 (list :type 'via :morphism 'tree-entries
+                       :filter (when (match-string 1 path)
+                                 (if (equal (match-string 1 path) "Blob") 'blob 'tree))))
+                ((equal path ".tree.blobs")    (list :type 'via :morphism 'tree-entries :filter 'blob))
+                ((equal path ".tree.subtrees") (list :type 'via :morphism 'tree-entries :filter 'tree))
+                ((equal path ".diff")
+                 ;; Optional REF: consume only if not a step keyword or /terminal
+                 (let ((ref (when (and tokens
+                                       (not (gitq--flat-boundary-p (car tokens)))
+                                       (not (string-prefix-p "." (car tokens))))
+                              (pop tokens))))
+                   (list :type 'via :morphism 'diff :ref ref)))
+                ((equal path ".diff.hunks") (list :type 'via :morphism 'diff-hunks))
+                ((equal path ".history")    (list :type 'via :morphism 'history))
+                ((equal path ".commit")     (list :type 'via :morphism 'commit))
+                (t (error "gitq: unknown morphism '%s'" path)))))
+    (cons node tokens)))
+
+(defun gitq--flat-parse-step (tokens)
+  "Parse one step node from flat TOKENS (first token must be a step keyword).
+Returns (node . remaining)."
+  (let ((kw (pop tokens)))
+    (pcase kw
+      ("via" (gitq--flat-parse-via tokens))
+      ("where" (gitq--flat-parse-where tokens))
+      ("grep"
+       (let* ((pat-tok (pop tokens))
+              (regex   (string-prefix-p "/" pat-tok))
+              (pattern (if regex (gitq--unregex pat-tok) (gitq--unquote pat-tok))))
+         ;; Inline "path" qualifier removed in flat mode — use a separate path step.
+         (cons (list :type 'grep :pattern pattern :regex regex :path-filter nil)
+               tokens)))
+      ("pickaxe"
+       (let* ((pat-tok (pop tokens))
+              (regex   (or (string-prefix-p "/" pat-tok)
+                           (equal (car tokens) "regex")))
+              (pattern (if (string-prefix-p "/" pat-tok)
+                           (gitq--unregex pat-tok)
+                         (gitq--unquote pat-tok))))
+         (when (equal (car tokens) "regex") (pop tokens))
+         (cons (list :type 'pickaxe :pattern pattern :regex regex) tokens)))
+      ("path"
+       (cons (list :type 'path :pattern (gitq--unquote (pop tokens))) tokens))
+      ("pick"
+       (let (fields)
+         (while (and tokens (not (gitq--flat-boundary-p (car tokens))))
+           (let ((tok (pop tokens)))
+             (when (and (not (equal tok ",")) (string-prefix-p "." tok))
+               (push (intern (substring tok 1)) fields))))
+         (cons (list :type 'pick :fields (nreverse fields)) tokens)))
+      ("take"
+       (cons (list :type 'take :n (string-to-number (pop tokens))) tokens))
+      ("skip"
+       (cons (list :type 'skip :n (string-to-number (pop tokens))) tokens))
+      ("first" (cons (list :type 'first) tokens))
+      ("last"  (cons (list :type 'last)  tokens))
+      ("sort"
+       (let* ((f   (pop tokens))
+              (neg (string-prefix-p "-" f))
+              (fn  (intern (substring (if neg (substring f 1) f) 1))))
+         (cons (list :type 'sort :field fn :desc neg) tokens)))
+      (_ (error "gitq: unknown step keyword '%s'" kw)))))
+
+(defun gitq--flat-parse-terminal (tok tokens)
+  "Parse /terminal token TOK using TOKENS for optional arguments.
+Returns (node . remaining)."
+  (let ((op-str (substring tok 1)))  ; strip leading /
+    (cons (gitq--parse-terminal op-str tokens)
+          ;; Terminals consume 0-2 tokens from `tokens' internally via pop,
+          ;; but gitq--parse-terminal uses its own local copy of the list.
+          ;; Since terminals must be last, pass nil as remaining.
+          nil)))
+
+(defun gitq--parse-flat (pipeline-str)
+  "Parse a flat pipeline PIPELINE-STR into a list of AST node plists.
+Uses whitespace as the stage separator with /terminal syntax.
+No pipe character required."
+  (let* ((tokens (gitq--tokenize-flat (string-trim pipeline-str)))
+         nodes)
+    (unless tokens (error "gitq: empty pipeline"))
+    ;; Parse source (first stage)
+    (let* ((result (gitq--flat-parse-source tokens)))
+      (push (car result) nodes)
+      (setq tokens (cdr result)))
+    ;; Parse steps and terminal
+    (while tokens
+      (let ((tok (car tokens)))
+        (cond
+         ((gitq--flat-terminal-p tok)
+          (let* ((result (gitq--flat-parse-terminal tok (cdr tokens))))
+            (push (car result) nodes)
+            (setq tokens nil)))     ; terminal is always last
+         ((gitq--flat-step-p tok)
+          (let* ((result (gitq--flat-parse-step tokens)))
+            (push (car result) nodes)
+            (setq tokens (cdr result))))
+         (t
+          (error "gitq: expected step keyword or /terminal, got '%s'" tok)))))
+    (nreverse nodes)))
+
+;;;###autoload
+(defun gitq-flat (pipeline)
+  "Execute a GitQ PIPELINE using flat syntax (whitespace-separated, /terminal).
+
+PIPELINE syntax:  source [step...] [/terminal]
+
+Sources:   commits [in RANGE]  HEAD  BRANCH  branches  tags  refs  worktrees  blobs
+Steps:     via MORPHISM  where COND[,COND...]  grep PATTERN  pickaxe PATTERN
+           path GLOB  pick .FIELD[,...]  take N  skip N  first  last  sort [-.] FIELD
+Terminals: /show  /copy  /insert  /count  /branch-off [NAME]  /amend [no-edit|MSG]
+           /squash [MSG]  /reword [MSG]  /remove  /delete  /commit [MSG]
+           /stage  /mark [LABEL]
+
+Step keywords are reserved: quote them when used as values.
+  CORRECT:  commits where .message contains \"take\" take 5 /show
+  WRONG:    commits where .message contains take take 5 /show  (error)
+
+Examples:
+  (gitq-flat \"commits take 10 /show\")
+  (gitq-flat \"commits where .author contains \\\"alice\\\" take 5 /count\")
+  (gitq-flat \"HEAD via .parent* where .message contains \\\"fix\\\" /show\")
+  (gitq-flat \"commits in main..HEAD sort -.date /show\")"
+  (interactive "sGitQ (flat): ")
+  (let* ((default-directory (gitq--toplevel))
+         (nodes    (gitq--parse-flat pipeline))
+         (src-node (car nodes))
+         (rest     (cdr nodes))
+         (last     (car (last rest)))
+         (is-term  (and last (eq (plist-get last :type) 'terminal)))
+         (steps    (if is-term (butlast rest) rest))
+         (terminal (when is-term last)))
+    (let* ((frames (gitq--exec-source src-node))
+           (result (cl-reduce #'gitq--exec-step steps :initial-value frames)))
+      (if terminal
+          (gitq--apply-terminal result terminal pipeline)
+        (gitq--display result pipeline)))))
+
 (provide 'git-branch-off-gitq)
 ;;; git-branch-off-gitq.el ends here
