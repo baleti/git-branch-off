@@ -94,7 +94,7 @@
                           (or (and (>= d ?a) (<= d ?z))
                               (and (>= d ?A) (<= d ?Z))
                               (and (>= d ?0) (<= d ?9))
-                              (memq d '(?. ?- ?_ ?[ ?] ?* ?+))
+                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
                               (eq d #x2020))))
               (setq i (1+ i)))
             (push (substring stage s i) tokens)))
@@ -106,7 +106,7 @@
                           (or (and (>= d ?a) (<= d ?z))
                               (and (>= d ?A) (<= d ?Z))
                               (and (>= d ?0) (<= d ?9))
-                              (memq d '(?. ?- ?_ ?[ ?] ?* ?+))
+                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
                               (eq d #x2020))))  ; U+2020 DAGGER †
               (setq i (1+ i)))
             (push (substring stage s i) tokens)))
