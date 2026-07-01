@@ -1408,10 +1408,9 @@ INPUT is everything typed so far; completions extend the last partial word."
 
 (defun gitq--complete-at-point ()
   "TAB handler inside a gitq minibuffer prompt.
-Computes context-aware candidates from what has been typed, then opens a
-nested `completing-read' (which vertico/selectrum intercept normally) so the
-user can pick a token.  The chosen token is inserted at point followed by a
-space, and the outer `read-from-minibuffer' continues."
+Computes context-aware candidates from what has been typed, then either
+inserts the single match directly or opens a nested `completing-read'
+so the user can pick from multiple candidates via vertico/selectrum."
   (interactive)
   (let* ((start    (minibuffer-prompt-end))
          (input    (buffer-substring-no-properties start (point)))
@@ -1421,10 +1420,16 @@ space, and the outer `read-from-minibuffer' continues."
          (partial  (if trailing "" (or (car (last tokens)) "")))
          (cands    (gitq--complete-candidates input)))
     (when cands
-      (let* ((enable-recursive-minibuffers t)
-             (choice (completing-read "Token: " cands nil nil partial)))
+      (let* ((matches (if (string-empty-p partial)
+                          cands
+                        (seq-filter (lambda (c) (string-prefix-p partial c)) cands)))
+             (choice  (if (= (length matches) 1)
+                          (car matches)
+                        (let ((enable-recursive-minibuffers t))
+                          (completing-read "Token: " cands nil nil partial)))))
         (delete-region (- (point) (length partial)) (point))
         (insert choice " ")))))
+
 
 (defun gitq-completion-at-point ()
   "CAPF for gitq pipeline strings.
