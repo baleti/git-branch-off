@@ -1406,26 +1406,31 @@ INPUT is everything typed so far; completions extend the last partial word."
      ;; Otherwise → step keywords + terminals
      (t (append gitq--flat-step-keywords gitq--complete-terminals)))))
 
-(defun gitq--pipeline-completion-table (str pred action)
-  "Completion table for a gitq pipeline string STR.
-Returns full-pipeline candidates (prefix + token) so vertico/corfu can display
-and filter them correctly without needing a separate CAPF layer."
-  (if (eq action 'metadata)
-      '(metadata (category . gitq-pipeline))
-    (let* ((trimmed  (string-trim-right str))
-           (trailing (not (equal trimmed str)))
-           (tokens   (gitq--tokenize-flat trimmed))
-           (partial  (if trailing "" (or (car (last tokens)) "")))
-           (prefix   (substring str 0 (- (length str) (length partial))))
-           (cands    (gitq--complete-candidates str))
-           (full     (mapcar (lambda (c) (concat prefix c)) (or cands '()))))
-      (complete-with-action action full str pred))))
+(defun gitq--complete-at-point ()
+  "TAB handler inside a gitq minibuffer prompt.
+Computes context-aware candidates from what has been typed, then opens a
+nested `completing-read' (which vertico/selectrum intercept normally) so the
+user can pick a token.  The chosen token is inserted at point followed by a
+space, and the outer `read-from-minibuffer' continues."
+  (interactive)
+  (let* ((start    (minibuffer-prompt-end))
+         (input    (buffer-substring-no-properties start (point)))
+         (trimmed  (string-trim-right input))
+         (trailing (not (equal trimmed input)))
+         (tokens   (gitq--tokenize-flat trimmed))
+         (partial  (if trailing "" (or (car (last tokens)) "")))
+         (cands    (gitq--complete-candidates input)))
+    (when cands
+      (let* ((enable-recursive-minibuffers t)
+             (choice (completing-read "Token: " cands nil nil partial)))
+        (delete-region (- (point) (length partial)) (point))
+        (insert choice " ")))))
 
 (defun gitq-completion-at-point ()
-  "CAPF for gitq pipeline strings in the minibuffer.
-Fallback for environments that call `completion-at-point' directly
-(e.g. vanilla Emacs, company-capf).  Vertico uses the completing-read
-table instead and does not call this."
+  "CAPF for gitq pipeline strings.
+For environments that call `completion-at-point' directly (company-capf,
+vanilla Emacs C-M-i).  `gitq--read-pipeline' binds TAB to
+`gitq--complete-at-point' instead, which opens a nested completing-read."
   (when (minibufferp)
     (let* ((start  (minibuffer-prompt-end))
            (input  (buffer-substring-no-properties start (point)))
@@ -1440,12 +1445,17 @@ table instead and does not call this."
         (list beg end candidates :exclusive 'no)))))
 
 (defun gitq--read-pipeline (prompt)
-  "Read a gitq pipeline from the minibuffer with context-aware completion.
-Uses `completing-read' so vertico, corfu, selectrum, and vanilla TAB all work.
-The completion table returns full-pipeline strings so the framework's own
-filtering logic sees each candidate as an extension of what was typed."
-  (completing-read prompt #'gitq--pipeline-completion-table
-                   nil nil nil 'gitq--history))
+  "Read a gitq pipeline from the minibuffer with on-demand TAB completion.
+Uses `read-from-minibuffer' so vertico does not auto-populate a candidate list.
+TAB calls `gitq--complete-at-point', which opens a nested `completing-read'
+that vertico/selectrum intercept — giving their full UI on demand."
+  (minibuffer-with-setup-hook
+      (lambda ()
+        (add-hook 'completion-at-point-functions
+                  #'gitq-completion-at-point nil t)
+        (use-local-map (copy-keymap (current-local-map)))
+        (local-set-key (kbd "TAB") #'gitq--complete-at-point))
+    (read-from-minibuffer prompt nil nil nil 'gitq--history)))
 
 ;;;###autoload
 (defun gitq-flat (pipeline)
