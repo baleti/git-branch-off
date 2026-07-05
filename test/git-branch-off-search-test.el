@@ -275,5 +275,60 @@ would have finished."
           (should (equal (car (funcall collector nil)) '("fresh-query"))))
       (funcall collector 'cancel))))
 
+;;; End-to-end pipeline against a real git repository
+
+(ert-deftest git-branch-off-search-test/full-pipeline-against-real-repo ()
+  "Exercise commit-cache, the all-grep builder, and the async collector
+together against a real repository, without going through the
+minibuffer. Regresses the actual `git' invocations, not just the pure
+helpers above."
+  :tags '(integration)
+  (git-branch-off-test--with-temp-repo
+    (git-branch-off-test--commit-file "a.txt" "hello world\n" "add a")
+    (git-branch-off-test--commit-file "b.txt" "needle-value here\n" "add b")
+    (let* ((cache (git-branch-off--search-commit-cache))
+           (collector (git-branch-off--search-make-collector
+                       #'git-branch-off--search-all-grep-builder
+                       (lambda (lines) (git-branch-off--search-format-lines lines cache))))
+           (git-branch-off-search-input-debounce 0.01)
+           (git-branch-off-search-input-throttle 0.01)
+           (git-branch-off-search-min-input 1))
+      (unwind-protect
+          (progn
+            (funcall collector 'setup)
+            (funcall collector "needle-value")
+            (sit-for 0.1)
+            (funcall collector nil)
+            (let ((deadline (+ (float-time) 5)))
+              (while (and (null (car (funcall collector nil)))
+                          (< (float-time) deadline))
+                (sit-for 0.1)))
+            (let* ((result (funcall collector nil))
+                   (candidates (car result)))
+              (should (null (cdr result)))
+              (should (= (length candidates) 1))
+              (let ((cand (car candidates)))
+                (should (equal (get-text-property 0 'git-branch-off-file cand) "b.txt"))
+                (should (equal (get-text-property 0 'git-branch-off-line cand) 1))
+                (should (git-branch-off--search-lookup cand candidates)))))
+        (funcall collector 'cancel)))))
+
+(ert-deftest git-branch-off-search-test/filename-collect-against-real-repo ()
+  "The filename-history collector reflects real add/delete events."
+  :tags '(integration)
+  (git-branch-off-test--with-temp-repo
+    (git-branch-off-test--commit-file "keep.txt" "x\n" "add keep")
+    (git-branch-off-test--commit-file "gone.txt" "y\n" "add gone")
+    (call-process "git" nil nil nil "rm" "-q" "gone.txt")
+    (call-process "git" nil nil nil "commit" "-q" "-m" "remove gone")
+    (let* ((cache (git-branch-off--search-commit-cache))
+           (cands (git-branch-off--search-filename-collect cache))
+           (statuses (mapcar (lambda (c) (get-text-property 0 'git-branch-off-status c)) cands))
+           (files (mapcar (lambda (c) (get-text-property 0 'git-branch-off-file c)) cands)))
+      (should (member "keep.txt" files))
+      (should (member "gone.txt" files))
+      (should (member "A" statuses))
+      (should (member "D" statuses)))))
+
 (provide 'git-branch-off-search-test)
 ;;; git-branch-off-search-test.el ends here
