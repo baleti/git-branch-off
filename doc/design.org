@@ -15,7 +15,7 @@ The package is split into eight focused files plus a root entry-point:
 | =git-branch-off-reword.el=    | Git plumbing layer; reword/remove with branch-off cascade  |
 | =git-branch-off-squash.el=    | Mark system, topological chain building, async squash      |
 | =git-branch-off-blob.el=      | n/p navigation in magit-blob with branch-off awareness     |
-| =git-branch-off-search.el=    | Four consult-based git history search commands             |
+| =git-branch-off-search.el=    | Four async git history search commands with live preview   |
 
 All public symbols use the =git-branch-off-= prefix.  Internal symbols use
 =git-branch-off--= (double dash).
@@ -162,4 +162,4 @@ The package deliberately avoids all doom-specific APIs:
 | Query theme colors      | =doom-color=       | not used (face is theme-neutral by default) |
 
 This means the package works unchanged in vanilla Emacs, Spacemacs, and any
-other configuration that provides magit (and optionally evil and consult).
+other configuration that provides magit (and optionally evil and Vertico).
