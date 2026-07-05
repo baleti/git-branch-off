@@ -367,5 +367,65 @@ helpers above."
       (should (member "A" statuses))
       (should (member "D" statuses)))))
 
+;;; default-directory correctness across the async collector's lifetime
+;;
+;; `git-branch-off--read-with-preview' cannot be driven end-to-end here:
+;; ERT runs under `--batch', and batch Emacs has no display/frame, so a
+;; real `completing-read'/minibuffer session cannot be opened at all --
+;; confirmed empirically (a `read-from-minibuffer' call in `--batch'
+;; immediately errors trying to read from stdin, since there is no
+;; keyboard event source). Manual/interactive verification of the real
+;; minibuffer session is tracked separately.
+;;
+;; What *can* be tested headlessly, and what the correctness of
+;; `git-branch-off--read-with-preview' actually reduces to (see the
+;; comment on `mb-setup' in git-branch-off-search.el): the collector
+;; must spawn its process using whatever `default-directory' is
+;; dynamically in effect at the moment something asks it for
+;; candidates (i.e. at spawn time), not whatever directory happened to
+;; be current when the collector was constructed. This test proves
+;; exactly that, using a real temp git repository and a real spawned
+;; process, without needing a minibuffer at all.
+
+(ert-deftest git-branch-off-search-test/collector-uses-directory-current-at-spawn-time ()
+  "The collector's spawned process runs in whichever directory is
+current-buffer's `default-directory' at spawn time, not wherever
+`default-directory' was when the collector was constructed. This is
+the exact property `git-branch-off--read-with-preview' relies on: it
+captures the minibuffer buffer once, then always does
+`(with-current-buffer mb-buffer ...)' before touching the collector,
+so correctness does not depend on any surrounding `let'-binding of
+`default-directory' remaining dynamically live for the whole session."
+  :tags '(integration)
+  (git-branch-off-test--with-temp-repo
+    (git-branch-off-test--commit-file "marker.txt" "x\n" "add marker")
+    (let* ((repo-dir (file-truename default-directory))
+           (builder (lambda (_input) (list (list "sh" "-c" "pwd"))))
+           (collector
+            ;; Construct the collector while a directory other than the
+            ;; repo -- e.g. /tmp -- is current, deliberately not repo-dir.
+            (let ((default-directory (file-truename temporary-file-directory)))
+              (git-branch-off--search-make-collector builder (lambda (lines) lines))))
+           (git-branch-off-search-input-debounce 0.01)
+           (git-branch-off-search-input-throttle 0.01)
+           (git-branch-off-search-min-input 1))
+      (unwind-protect
+          ;; Drive the collector from a dynamic extent where
+          ;; `default-directory' is repo-dir -- mirroring what `poll'
+          ;; does via `(with-current-buffer mb-buffer ...)'.
+          (let ((default-directory repo-dir))
+            (funcall collector 'setup)
+            (funcall collector "x")
+            (sit-for 0.1)
+            (funcall collector nil)
+            (let ((deadline (+ (float-time) 3)))
+              (while (and (null (car (funcall collector nil)))
+                          (< (float-time) deadline))
+                (sit-for 0.05)))
+            (let ((candidates (car (funcall collector nil))))
+              (should (= (length candidates) 1))
+              (should (equal (file-truename (string-trim (car candidates))) repo-dir))))
+        (funcall collector 'cancel)))))
+
 (provide 'git-branch-off-search-test)
 ;;; git-branch-off-search-test.el ends here

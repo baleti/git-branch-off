@@ -455,6 +455,26 @@ is made available as the first `M-n' suggestion without being inserted."
                  (funcall state 'preview
                           (and cand (git-branch-off--search-lookup cand (current-candidates))))))))
          (mb-setup ()
+           ;; `default-directory' correctness for the process spawned by
+           ;; the collector does not depend on any surrounding
+           ;; `let'-binding (e.g. the one in `git-branch-off--search-grep-read')
+           ;; staying dynamically live for the whole minibuffer session --
+           ;; verified empirically (a plain dynamic let-binding of
+           ;; `default-directory' does NOT survive a `with-current-buffer'
+           ;; switch to an unrelated, already-existing buffer). What
+           ;; actually makes this correct: Emacs seeds a *newly created*
+           ;; minibuffer buffer's own (buffer-local) `default-directory'
+           ;; by copying whatever value is dynamically in effect at the
+           ;; moment the minibuffer is entered -- a one-time copy, not an
+           ;; ongoing dynamic link. Since that happens while our caller's
+           ;; `let'-bound `default-directory' is still active (we are
+           ;; still inside that `let' here, in `mb-setup', which Emacs
+           ;; runs as part of creating this very minibuffer buffer), the
+           ;; correct directory gets baked into `mb-buffer' permanently,
+           ;; and every later callback here reaches it via
+           ;; `(with-current-buffer mb-buffer ...)', independent of
+           ;; whether the caller's `let' has since unwound. See
+           ;; git-branch-off-search-test/collector-uses-directory-current-at-spawn-time.
            (setq mb-buffer (current-buffer))
            (when collector (funcall collector 'setup))
            (add-hook 'post-command-hook #'preview-tick nil t)
