@@ -46,12 +46,41 @@ escape syntax, which these commands have never needed."
     (should (equal (git-branch-off--search-group cand nil)
                     "abcd1234  2024-01-01  Author"))))
 
-(ert-deftest git-branch-off-search-test/group-transform-strips-prefix-length ()
-  "Transformed, the group function strips (1+ group-length) leading chars."
-  (let* ((group "abcd1234  2024-01-01  Author")
-         (cand (concat (make-string (1+ (length group)) ?x) "REST"))
-         (cand (propertize cand 'git-branch-off-search-group group)))
-    (should (equal (git-branch-off--search-group cand t) "REST"))))
+(ert-deftest git-branch-off-search-test/group-transform-strips-hash-prefix-only ()
+  "Transformed, the group function strips exactly the
+`git-branch-off-search-group-prefix-len' leading characters (the
+duplicated short hash) -- NOT the length of the group title text
+itself, which is unrelated commit-date/author text and is not
+literally a prefix of the candidate.
+
+This regresses a real display bug found via manual/interactive
+verification: with the old (group-title-length-based) stripping, the
+group title (\"hash  date  author\", often 25-40 chars) was longer than
+the actual redundant prefix (just the 8-char hash), so grouped display
+silently chopped real content (the file name and part of the matched
+line) off the front of every candidate."
+  (let* ((group "abcd1234  2024-01-01  Author With A Long Name")
+         (cand (concat "abcd1234" ":file.el:12: the matched line"))
+         (cand (propertize cand
+                           'git-branch-off-search-group group
+                           'git-branch-off-search-group-prefix-len 8)))
+    (should (equal (git-branch-off--search-group cand t) ":file.el:12: the matched line"))))
+
+(ert-deftest git-branch-off-search-test/group-transform-against-real-parse-line ()
+  "End-to-end: a real candidate from `git-branch-off--search-parse-line'
+transforms to exactly its file/line/content portion, with the
+duplicated hash (and only the hash) stripped."
+  (let* ((full-hash (concat "abcd1234" (make-string 32 ?f)))
+         (cache (let ((tbl (make-hash-table :test #'equal)))
+                  (puthash full-hash "2024-01-01  Author" tbl)
+                  tbl))
+         (line (format "%s:file.el:12:the matched line" full-hash))
+         (cand (git-branch-off--search-parse-line line cache)))
+    ;; `cand' carries a trailing invisible disambiguation character
+    ;; (see `git-branch-off--search-tag-candidate'); strip it before
+    ;; comparing against the expected visible text.
+    (should (equal (substring (git-branch-off--search-group cand t) 0 -1)
+                   ":file.el:12: the matched line"))))
 
 ;;; git-branch-off--search-lookup
 
@@ -426,6 +455,66 @@ so correctness does not depend on any surrounding `let'-binding of
               (should (= (length candidates) 1))
               (should (equal (file-truename (string-trim (car candidates))) repo-dir))))
         (funcall collector 'cancel)))))
+
+;;; git-branch-off--read-with-preview abort path
+;;
+;; Found via manual/interactive verification (a real `completing-read'
+;; session cannot run in `--batch', but the `quit' handling itself can
+;; be exercised headlessly by stubbing out `completing-read' to signal
+;; `quit' immediately, so it never actually needs a real minibuffer):
+;; the `state' function's contract is always a 2-argument call, `(action
+;; cand)', but the abort path only ever called it with 1 argument,
+;; `(funcall state 'exit)', which threw `wrong-number-of-arguments' on
+;; every real `C-g' abort -- invisible to the whole batch ERT suite
+;; since nothing else exercised this specific path.
+
+(ert-deftest git-branch-off-search-test/read-with-preview-calls-state-exit-with-two-args ()
+  "On abort (`quit'), STATE must be called as `(funcall state \\='exit nil)',
+matching its 2-argument `(action cand)' contract everywhere else."
+  (let* ((calls nil)
+         (state (lambda (action cand) (push (list action cand) calls))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) (signal 'quit nil))))
+      (git-branch-off--read-with-preview (list "a" "b") "prompt: " state))
+    (should (equal calls '((exit nil))))))
+
+(ert-deftest git-branch-off-search-test/read-with-preview-calls-state-return-on-success ()
+  "On a successful selection, STATE is called with \\='return and the
+looked-up candidate object."
+  (let* ((calls nil)
+         (state (lambda (action cand) (push (list action cand) calls))))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "b")))
+      (git-branch-off--read-with-preview (list "a" "b") "prompt: " state))
+    (should (equal calls '((return "b"))))))
+
+;;; git-branch-off--search-original-window
+;;
+;; Found via manual/interactive verification, the most serious bug
+;; caught by this pass: `git-branch-off--search-make-state's \\='preview
+;; action calls `(selected-window)' directly, assuming it is the window
+;; the user was looking at before the search started. That assumption
+;; held for the original Consult-driven version only because Consult's
+;; own preview machinery always invoked the state function via
+;; `(with-selected-window (consult--original-window) ...)' -- porting
+;; the state function unchanged (correctly, since it never called any
+;; Consult preview helper) missed that this surrounding wrapper was
+;; Consult's responsibility, not the state function's own. Without it,
+;; `(selected-window)' inside the state function returned the
+;; *minibuffer's own window*, and swapping that window's buffer to the
+;; preview buffer reliably crashed Vertico's next redisplay with
+;; `(wrong-type-argument number-or-marker-p nil)' inside
+;; `vertico--arrange-candidates' (traced to `vertico--window-width'
+;; returning nil from `cl-loop ... minimize' over an empty window
+;; list). Confirmed via a real -nw Emacs session under tmux, reproduced
+;; reliably across every one of several stress runs before the fix, and
+;; reproduced zero times across 5 repeat runs after it.
+
+(ert-deftest git-branch-off-search-test/original-window-fallback-outside-minibuffer ()
+  "Outside any minibuffer session, falls back to the currently selected
+window (mirroring Consult's `consult--original-window', which never
+returns nil)."
+  (should (eq (git-branch-off--search-original-window) (selected-window))))
 
 (provide 'git-branch-off-search-test)
 ;;; git-branch-off-search-test.el ends here

@@ -169,6 +169,15 @@ of the currently-highlighted candidate (as opposed to the literally typed
 text) works with Vertico; other completion front-ends fall back to
 preview-as-you-type.
 
+*Requires a substring-style completion configuration* (e.g. =orderless=,
+which Doom's =:completion vertico= module bundles by default). Candidates are
+displayed as =hash:file:line: content=, so the typed search text only ever
+appears in the middle of a candidate, never as its literal prefix; with the
+stock Emacs =basic= completion style (prefix-only matching), every real
+result would be filtered out by =completing-read= itself before it ever
+reaches the list, even though the search found matches. This is the same
+requirement Consult itself documents for its own grep-style commands.
+
 * Installation
 
 ** Doom Emacs

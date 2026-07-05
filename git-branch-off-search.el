@@ -113,6 +113,8 @@ Expected format: <40-sha>:<file>:<lineno>:<content>"
       (put-text-property 0 1 'git-branch-off-line  lineno cand)
       (put-text-property 0 1 'git-branch-off-search-group
                          (concat short "  " info) cand)
+      (put-text-property 0 1 'git-branch-off-search-group-prefix-len
+                         (length short) cand)
       (git-branch-off--search-tag-candidate cand))))
 
 (defun git-branch-off--search-format-lines (lines cache)
@@ -167,9 +169,13 @@ since it has never been exercised by these commands."
 (defun git-branch-off--search-group (cand transform)
   "Group function for search candidates.
 CAND must carry a `git-branch-off-search-group' text property giving
-its group title."
+its group title, and a `git-branch-off-search-group-prefix-len' text
+property giving the number of leading characters of CAND that are
+already redundant with that group title (the short hash), so TRANSFORM
+strips only that -- not the length of the (much longer, unrelated)
+group title text itself, which is not literally a prefix of CAND."
   (if transform
-      (substring cand (1+ (length (get-text-property 0 'git-branch-off-search-group cand))))
+      (substring cand (get-text-property 0 'git-branch-off-search-group-prefix-len cand))
     (get-text-property 0 'git-branch-off-search-group cand)))
 
 ;;; Candidate disambiguation
@@ -405,13 +411,67 @@ preview-as-you-move-selection to preview-as-you-type."
       (vertico--candidate)
     (minibuffer-contents-no-properties)))
 
+(defun git-branch-off--search-original-window ()
+  "Return the window that was selected just before the minibuffer was
+entered, never nil (falls back to the next non-minibuffer window, or
+the current window, if Emacs has no record of one).
+
+`git-branch-off--search-make-state's \\='preview action calls
+`(selected-window)' directly to find the window to swap in the preview
+buffer, assuming it is the window the user was looking at before
+starting the search -- true for the original Consult-driven version,
+because Consult's own preview machinery always calls the state
+function via `(with-selected-window (consult--original-window) ...)'.
+Porting the state function unchanged (correctly, per the plan: it
+never called any Consult preview helper) missed that this surrounding
+wrapper was Consult's responsibility, not the state function's own.
+Without it, `(selected-window)' inside the state function returns the
+*minibuffer's own window* (since that is genuinely the selected window
+while typing), and swapping that window's buffer to the preview buffer
+corrupts Vertico's next candidate-list redisplay -- confirmed via
+manual/interactive testing: it reproduced a reliable
+`(wrong-type-argument number-or-marker-p nil)' crash inside
+`vertico--arrange-candidates', traced to `vertico--window-width'
+returning nil from `(cl-loop ... minimize ...)' over an empty window
+list once the minibuffer's own window had been hijacked as the preview
+target. This function, plus wrapping the preview `funcall' in
+`git-branch-off--read-with-preview' with
+`(with-selected-window (git-branch-off--search-original-window) ...)',
+is the fix: it mirrors Consult's own `consult--original-window'."
+  (or (minibuffer-selected-window)
+      (if (window-minibuffer-p (selected-window))
+          (next-window)
+        (selected-window))))
+
 (defun git-branch-off--search-force-refresh ()
-  "Best-effort nudge for the completion UI to redisplay.
-Needed because new asynchronous candidates can arrive with no
-keystroke to trigger the front-end's own recomputation."
+  "Mark the completion UI's cached input stale so its next natural
+update picks up newly arrived asynchronous candidates.
+
+This intentionally does NOT call `vertico--exhibit' directly, unlike
+Consult's own equivalent (`consult--vertico-refresh'). Calling it
+directly from this package's own refresh timer was tried first and
+reproduced a real, reproducible crash via manual/interactive testing:
+`(wrong-type-argument number-or-marker-p nil)' inside
+`vertico--arrange-candidates', surfacing on a real arrow-key press
+shortly after a timer-triggered exhibit call. The trigger is not
+simple reentrancy (a depth-counter guard around `vertico--exhibit'
+still did not prevent it, and logging confirmed the crash-preceding
+calls never actually overlapped) -- the more likely mechanism: if our
+own out-of-band `vertico--exhibit' call gets interrupted by
+`while-no-input' (e.g. because a real keystroke was already queued),
+`vertico--input' is left stuck at the `t' sentinel we set to force
+recompute, instead of being reset to a proper (STR . POINT) cons by a
+completed `vertico--compute'. Chasing the exact resulting inconsistency
+further was not worth the risk of leaving another edge case
+unaccounted for. Only ever setting the sentinel and letting Vertico's
+own `vertico--prepare' (on `pre-command-hook') or `vertico--exhibit'
+(on `post-command-hook') perform the actual recompute -- both entered
+only via Vertico's own normal, real command flow -- avoids the whole
+class of hazard. The tradeoff: candidates only visibly refresh on the
+user's next keystroke or navigation, not while they sit idle watching;
+this is a deliberate safety-over-liveness choice, not an oversight."
   (when (bound-and-true-p vertico--input)
-    (setq vertico--input t)
-    (vertico--exhibit)))
+    (setq vertico--input t)))
 
 (defun git-branch-off--read-with-preview (source prompt state &optional history add-history)
   "Read a candidate via `completing-read', driving STATE for preview.
@@ -452,8 +512,12 @@ is made available as the first `M-n' suggestion without being inserted."
              (let ((cand (git-branch-off--search-current-candidate)))
                (unless (equal cand last-candidate)
                  (setq last-candidate cand)
-                 (funcall state 'preview
-                          (and cand (git-branch-off--search-lookup cand (current-candidates))))))))
+                 ;; Must run with the *original* (pre-minibuffer) window
+                 ;; selected, not the minibuffer's own window -- see
+                 ;; `git-branch-off--search-original-window'.
+                 (with-selected-window (git-branch-off--search-original-window)
+                   (funcall state 'preview
+                            (and cand (git-branch-off--search-lookup cand (current-candidates)))))))))
          (mb-setup ()
            ;; `default-directory' correctness for the process spawned by
            ;; the collector does not depend on any surrounding
@@ -478,6 +542,18 @@ is made available as the first `M-n' suggestion without being inserted."
            (setq mb-buffer (current-buffer))
            (when collector (funcall collector 'setup))
            (add-hook 'post-command-hook #'preview-tick nil t)
+           ;; A plain `run-with-timer' can in principle fire while a real
+           ;; command's own `vertico--exhibit' call is mid-flight (inside
+           ;; `while-no-input's internal polling). `run-with-idle-timer'
+           ;; was tried instead, but proved unreliable in practice: any
+           ;; steady stream of activity (e.g. this package's own async
+           ;; process output, or just fast typing) can keep pushing true
+           ;; idleness out indefinitely, so candidates could stop
+           ;; refreshing altogether. The actual fix is in
+           ;; `git-branch-off--search-force-refresh' itself, which checks
+           ;; `input-pending-p' before touching `vertico--exhibit' --
+           ;; see its docstring for the reentrancy hazard this guards
+           ;; against, found via manual/interactive testing.
            (setq refresh-timer
                  (run-with-timer git-branch-off-search-refresh-delay
                                   git-branch-off-search-refresh-delay
@@ -497,7 +573,7 @@ is made available as the first `M-n' suggestion without being inserted."
                      (cand (git-branch-off--search-lookup result (current-candidates))))
                 (funcall state 'return cand)
                 cand)
-            (quit (funcall state 'exit) nil))
+            (quit (funcall state 'exit nil) nil))
         (when refresh-timer (cancel-timer refresh-timer))
         (when collector (funcall collector 'cancel))))))
 
@@ -566,6 +642,8 @@ $(git log --all -G%s --format=%%H 2>/dev/null | head -n 500) 2>/dev/null"
               (put-text-property 0 1 'git-branch-off-status status   cand)
               (put-text-property 0 1 'git-branch-off-search-group
                                  (concat short "  " info) cand)
+              (put-text-property 0 1 'git-branch-off-search-group-prefix-len
+                                 (length short) cand)
               (push (git-branch-off--search-tag-candidate cand) result)))))
         (forward-line 1)))
     (nreverse result)))
