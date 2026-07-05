@@ -70,17 +70,54 @@ so text properties (hash/file/line) survive the round trip."
     (should (eq (git-branch-off--search-lookup "x" candidates) cand))))
 
 (ert-deftest git-branch-off-search-test/lookup-duplicate-display-strings ()
-  "Document the duplicate-display-string edge case explicitly: a plain
-`equal'-based lookup cannot disambiguate two candidates that render
-identically; it always resolves to the first. Our grep candidates
-always include a file+line prefix, so two real matches cannot collide
-in practice, but this test pins down the (first-wins) behavior so a
-future regression would be visible here rather than as a silent
-wrong-selection bug report."
+  "A plain `equal'-based lookup over two candidates that render
+identically always resolves to the first; this pins down that
+(first-wins) fallback behavior for candidates that are genuinely
+indistinguishable, so a caller relying on `git-branch-off--search-lookup'
+directly with such input has predictable (if unhelpful) behavior."
   (let* ((first (propertize "dup" 'marker 1))
          (second (propertize "dup" 'marker 2))
          (candidates (list first second)))
     (should (eq (git-branch-off--search-lookup "dup" candidates) first))))
+
+(ert-deftest git-branch-off-search-test/parse-line-disambiguates-short-hash-collisions ()
+  "Two distinct commits whose 8-char short hashes collide (a real
+possibility in a large repo: 32 bits of hash space, ~50% birthday
+collision by ~77k commits) and which touch the same file/line/content
+(common for an unchanged line across history, especially with
+`git-branch-off-search-all-grep', which intentionally surfaces every
+commit touching a blob) would render byte-for-byte identical visible
+candidate text. Confirm `git-branch-off--search-parse-line' tags each
+candidate with a unique disambiguation suffix so the two full candidate
+strings are never `equal', even though their visible portion is
+identical -- and that lookup then resolves each one correctly rather
+than silently collapsing to whichever appears first."
+  (let* ((full-hash-1 (concat "11111111" (make-string 31 ?a) "b"))
+         (full-hash-2 (concat "11111111" (make-string 31 ?a) "c"))
+         (cache (let ((tbl (make-hash-table :test #'equal)))
+                  (puthash full-hash-1 "2024-01-01  Alice" tbl)
+                  (puthash full-hash-2 "2024-01-01  Alice" tbl)
+                  tbl))
+         (line1 (format "%s:same/file.txt:42:identical content" full-hash-1))
+         (line2 (format "%s:same/file.txt:42:identical content" full-hash-2))
+         (cand1 (git-branch-off--search-parse-line line1 cache))
+         (cand2 (git-branch-off--search-parse-line line2 cache)))
+    ;; Precondition: both hashes really do share the same 8-char short
+    ;; hash, and file/line/content are identical, so the *visible*
+    ;; (property-stripped) portion of the two candidates is identical --
+    ;; except for the one trailing invisible disambiguation character
+    ;; each candidate is tagged with, which we strip off here to check
+    ;; the precondition on the part a human would actually see.
+    (should (equal (substring-no-properties cand1 0 -1) (substring-no-properties cand2 0 -1)))
+    (should-not (equal (get-text-property 0 'git-branch-off-hash cand1)
+                        (get-text-property 0 'git-branch-off-hash cand2)))
+    ;; The full candidate strings (with disambiguation suffix) must
+    ;; nonetheless differ, so `member'/`equal'-based lookup never
+    ;; collides.
+    (should-not (equal cand1 cand2))
+    (let ((candidates (list cand1 cand2)))
+      (should (eq (git-branch-off--search-lookup cand1 candidates) cand1))
+      (should (eq (git-branch-off--search-lookup cand2 candidates) cand2)))))
 
 ;;; git-branch-off--search-buffer-lines
 

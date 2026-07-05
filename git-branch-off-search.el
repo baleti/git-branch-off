@@ -113,7 +113,7 @@ Expected format: <40-sha>:<file>:<lineno>:<content>"
       (put-text-property 0 1 'git-branch-off-line  lineno cand)
       (put-text-property 0 1 'git-branch-off-search-group
                          (concat short "  " info) cand)
-      cand)))
+      (git-branch-off--search-tag-candidate cand))))
 
 (defun git-branch-off--search-format-lines (lines cache)
   "Filter and format a batch of git grep output LINES into candidates using CACHE."
@@ -172,10 +172,62 @@ its group title."
       (substring cand (1+ (length (get-text-property 0 'git-branch-off-search-group cand))))
     (get-text-property 0 'git-branch-off-search-group cand)))
 
+;;; Candidate disambiguation
+;;
+;; Candidate lookup below is `equal'-based (plain string comparison),
+;; and the four candidate-producing functions in this file only ever
+;; encode identifying information (commit hash, file, line) as *visible*
+;; text, not purely as text properties -- so two distinct candidates
+;; that happen to render identical visible text would otherwise resolve
+;; to whichever one is `member' finds first.
+;;
+;; This is not just a theoretical concern: `git-branch-off--search-parse-line'
+;; only shows an 8-hex-char short hash (32 bits of space -- a ~50%
+;; birthday-collision chance by around 77k distinct commits, which real
+;; large repos can reach), and `git-branch-off-search-all-grep'
+;; deliberately searches every commit that ever touched a blob, so the
+;; same file/line/content recurring across many commits (an unchanged
+;; line persisting through history) is the common case, not an edge
+;; case. Two different commits whose short hashes happen to collide,
+;; both showing the same unchanged file/line/content, would otherwise
+;; be visually and programmatically indistinguishable.
+;;
+;; We fix this exactly the way Consult's own `consult--tofu-char'
+;; mechanism does: append a small, invisible, per-candidate
+;; disambiguation suffix so that no two candidates from the same
+;; collection can ever compare `equal', regardless of what their
+;; visible text looks like.
+
+(defconst git-branch-off--search-tofu-char #x100000
+  "Base codepoint (Unicode Private Use Area B) for disambiguation suffixes.
+Mirrors Consult's own `consult--tofu-char'.")
+
+(defconst git-branch-off--search-tofu-range #xfffe
+  "Number of distinct disambiguation codepoints available.")
+
+(defvar git-branch-off--search-tofu-counter 0
+  "Monotonic counter backing `git-branch-off--search-tag-candidate'.
+Never reset, so uniqueness holds across an entire Emacs session, not
+just within one collection.")
+
+(defun git-branch-off--search-tag-candidate (cand)
+  "Return CAND with a unique invisible disambiguation suffix appended.
+Guarantees CAND can never compare `equal' to any other tagged
+candidate, even one with byte-for-byte identical visible text."
+  (let ((n (cl-incf git-branch-off--search-tofu-counter)))
+    (concat cand
+            (propertize (string (+ git-branch-off--search-tofu-char
+                                    (mod n git-branch-off--search-tofu-range)))
+                        'invisible t))))
+
 ;;; Candidate lookup
 
 (defun git-branch-off--search-lookup (selected candidates)
-  "Return the element of CANDIDATES `equal' to SELECTED, or nil."
+  "Return the element of CANDIDATES `equal' to SELECTED, or nil.
+Uses plain `equal' over the full (tagged) candidate string; it is up
+to callers to ensure CANDIDATES came from a candidate-producing
+function that ran each one through `git-branch-off--search-tag-candidate',
+so that two visually-identical candidates never actually collide here."
   (car (member selected candidates)))
 
 ;;; Async process collection
@@ -494,7 +546,7 @@ $(git log --all -G%s --format=%%H 2>/dev/null | head -n 500) 2>/dev/null"
               (put-text-property 0 1 'git-branch-off-status status   cand)
               (put-text-property 0 1 'git-branch-off-search-group
                                  (concat short "  " info) cand)
-              (push cand result)))))
+              (push (git-branch-off--search-tag-candidate cand) result)))))
         (forward-line 1)))
     (nreverse result)))
 
