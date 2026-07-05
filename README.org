@@ -154,7 +154,7 @@ commits for squash.  Mark multiple with evil visual mode then =m=.
 | =git-branch-off-amend-hunk-no-edit=  | =SPC g a n=     | Same but reuse existing message (=magit-commit-extend=)   |
 | =git-branch-off-select-hunk=         | —               | Select the diff hunk under point as evil visual region    |
 
-** Search (requires =consult=)
+** Search
 
 | Command                                   | Default binding | Description                                     |
 |-------------------------------------------+-----------------+-------------------------------------------------|
@@ -163,8 +163,11 @@ commits for squash.  Mark multiple with evil visual mode then =m=.
 | =git-branch-off-search-pickaxe-s=        | =SPC s g S=     | Commits where a literal string count changed    |
 | =git-branch-off-search-all-grep=         | =SPC s g a=     | =git grep= across every committed blob          |
 
-All search commands use consult's async preview: navigate the candidates and
-the matching line in the historical commit is shown immediately.
+All search commands use a built-in async preview: navigate the candidates and
+the matching line in the historical commit is shown immediately. Live preview
+of the currently-highlighted candidate (as opposed to the literally typed
+text) works with Vertico; other completion front-ends fall back to
+preview-as-you-type.
 
 * Installation
 
@@ -233,7 +236,7 @@ the matching line in the historical commit is shown immediately.
 |----------+----------+---------------------------------------------|
 | =magit=  | yes      | Core dependency for all commands            |
 | =evil=   | optional | Setup applied automatically when present   |
-| =consult= | optional | Required only for the four search commands |
+| =vertico= | optional | If present, enables live preview-as-you-move-selection for the search commands |
 
 The package itself contains no doom-specific macros.  All mode-map bindings
 and hooks are installed via =git-branch-off-setup= using standard Emacs APIs.
