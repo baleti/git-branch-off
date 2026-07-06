@@ -824,8 +824,8 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
     (put-text-property start (point) 'gitq-sha (gitq--frame-commit-sha frame))
     (insert "\n")))
 
-(defun gitq--display (frames pipeline-str)
-  "Show FRAMES in the *gitq* results buffer."
+(defun gitq--render (frames pipeline-str)
+  "Render FRAMES into the *gitq* results buffer and return that buffer."
   (with-current-buffer (get-buffer-create "*gitq*")
     (let ((inhibit-read-only t))
       (erase-buffer)
@@ -836,7 +836,18 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
         (insert "(no results)\n"))
       (gitq-results-mode)
       (goto-char (point-min)))
-    (pop-to-buffer (current-buffer))))
+    (current-buffer)))
+
+(defun gitq--display (frames pipeline-str)
+  "Show FRAMES in the *gitq* results buffer, selecting its window."
+  (pop-to-buffer (gitq--render frames pipeline-str)))
+
+(defun gitq--preview-display (frames pipeline-str)
+  "Show FRAMES in the *gitq* results buffer without selecting its window.
+Used to preview a pipeline still being typed in the minibuffer: results
+appear right away, above the minibuffer, without taking focus away
+from typing."
+  (display-buffer (gitq--render frames pipeline-str)))
 
 ;;;###autoload
 (defun gitq-results-visit ()
@@ -1561,12 +1572,83 @@ are annotated via `gitq--affixate'."
                           (gitq--current-token string)
                           predicate))))
 
-(defun gitq--read-pipeline (prompt)
+;;; Live preview
+
+(defcustom git-branch-off-gitq-preview-debounce 0.2
+  "Seconds of no further input change before gitq (re)previews results."
+  :type 'number :group 'git-branch-off)
+
+(defun gitq--preview-frames (input parser)
+  "Return (:ok . FRAMES) if INPUT is a complete pipeline via PARSER, else nil.
+Parses INPUT with PARSER and executes the source and steps (via
+`gitq--exec-nodes'), discarding any terminal — a terminal keyword is
+recognized as ending the pipeline, but its action (branch-off, amend,
+commit, ...) is never applied here, since this only ever previews
+results while the pipeline is still being typed.
+
+Returns nil, with no side effects, if INPUT does not currently parse
+or execute cleanly (still mid-token, an unknown keyword, a missing
+argument, not inside a repo, ...); the caller should leave whatever
+was previously shown as-is in that case.  The (:ok . FRAMES) wrapper
+distinguishes \"not ready yet\" (nil) from \"ready, and matched zero
+results\" (FRAMES is an empty list) — both are otherwise nil.
+
+A source token gitq doesn't recognize as a keyword (\"commits\", \"HEAD\",
+...) parses as a literal ref/branch/commit name instead (see
+`gitq--parse-source' / `gitq--flat-parse-source').  That fallback
+matches genuine ref lookups, but it also matches every partial word on
+the way to typing a real keyword — e.g. \"commi\" parses just fine as
+an (unresolvable) ref while the user is still typing \"commits\".  Left
+alone, that would flash an empty \"(no results)\" preview on each such
+keystroke.  So a `ref' source is only treated as ready once it actually
+resolves; final command execution (`gitq' / `gitq-flat') is untouched
+and still shows \"(no results)\" for a genuinely nonexistent ref."
+  (ignore-errors
+    (let* ((default-directory (gitq--toplevel))
+           (nodes    (funcall parser input))
+           (src-node (car nodes)))
+      (unless (and (eq (plist-get src-node :source) 'ref)
+                   (not (gitq--fetch-commit (plist-get src-node :ref))))
+        (cons :ok (car (gitq--exec-nodes nodes)))))))
+
+(defun gitq--read-pipeline (prompt &optional parser)
   "Read a gitq pipeline with `completing-read', driven by Vertico.
 Backed by `gitq--completion-table', so the full candidate set for the
 current pipeline position is shown as soon as the prompt opens, and
-live-updates as each token is completed and the next one begins."
-  (completing-read prompt #'gitq--completion-table nil nil nil 'gitq--history))
+live-updates as each token is completed and the next one begins.
+
+While typing, on a short debounce (`git-branch-off-gitq-preview-debounce'),
+the current input is parsed with PARSER (`gitq--parse-flat' by default;
+pass `gitq--parse' for pipe syntax) via `gitq--preview-frames'.  As soon
+as it parses into a complete pipeline that also executes without error,
+the resulting frames are shown read-only in the *gitq* buffer via
+`gitq--preview-display', which does not select that buffer's window —
+focus stays in the minibuffer so typing is uninterrupted.  Pressing RET
+hands the final string back to the caller, which runs the pipeline for
+real, terminal included."
+  (let ((parser     (or parser #'gitq--parse-flat))
+        (mb-buffer  nil)
+        (last-input nil)
+        (timer      nil))
+    (cl-labels
+        ((tick ()
+           (when (buffer-live-p mb-buffer)
+             (with-current-buffer mb-buffer
+               (let ((input (minibuffer-contents-no-properties)))
+                 (unless (equal input last-input)
+                   (setq last-input input)
+                   (pcase (gitq--preview-frames input parser)
+                     (`(:ok . ,frames) (gitq--preview-display frames input))))))))
+         (schedule ()
+           (when timer (cancel-timer timer))
+           (setq timer (run-with-timer git-branch-off-gitq-preview-debounce nil #'tick)))
+         (setup ()
+           (setq mb-buffer (current-buffer))
+           (add-hook 'post-command-hook #'schedule nil t)))
+      (unwind-protect
+          (minibuffer-with-setup-hook #'setup
+            (completing-read prompt #'gitq--completion-table nil nil nil 'gitq--history))
+        (when timer (cancel-timer timer))))))
 
 ;;;###autoload
 (defun gitq-flat (pipeline)

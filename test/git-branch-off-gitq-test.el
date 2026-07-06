@@ -989,5 +989,116 @@ index abc..def 100644\n\
           ;; head message should NOT appear as a result (it's not the parent)
           (should-not (string-match-p "the-head-msg" body)))))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--exec-nodes
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--exec-nodes/no-terminal ()
+  "A pipeline with no terminal returns (RESULT . nil)."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let* ((exec (gitq--exec-nodes (gitq--parse-flat "commits")))
+           (result (car exec)) (terminal (cdr exec)))
+      (should (null terminal))
+      (should (= (length result) 1)))))
+
+(ert-deftest gitq-test--exec-nodes/with-terminal-not-applied ()
+  "A terminal is identified and returned, but never itself executed."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let* ((exec (gitq--exec-nodes (gitq--parse-flat "commits /branch-off \"unapplied-branch\"")))
+           (result (car exec)) (terminal (cdr exec)))
+      (should (eq (plist-get terminal :type) 'terminal))
+      (should (eq (plist-get terminal :op) 'branch-off))
+      (should (= (length result) 1))
+      ;; gitq--exec-nodes must not have created the branch itself.
+      (should (= (length (gitq--git "branch" "--list" "unapplied-branch")) 0)))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--preview-frames
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--preview-frames/mid-token-is-not-ready ()
+  "A partial source keyword (\"commi\" toward \"commits\") previews as nil,
+not as a resolved-but-empty ref lookup."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (null (gitq--preview-frames "commi" #'gitq--parse-flat)))))
+
+(ert-deftest gitq-test--preview-frames/mid-step-keyword-is-not-ready ()
+  "A partial step keyword (\"wh\" toward \"where\") fails to parse, so
+preview is nil."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (null (gitq--preview-frames "commits wh" #'gitq--parse-flat)))))
+
+(ert-deftest gitq-test--preview-frames/complete-source-only ()
+  "A bare, complete source keyword previews immediately."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((r (gitq--preview-frames "commits" #'gitq--parse-flat)))
+      (should (eq (car r) :ok))
+      (should (= (length (cdr r)) 1)))))
+
+(ert-deftest gitq-test--preview-frames/complete-with-where ()
+  "A complete pipeline with a where-clause previews the filtered result."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "commit by test user")
+    (let ((r (gitq--preview-frames
+              "commits where .author contains \"Test\"" #'gitq--parse-flat)))
+      (should (eq (car r) :ok))
+      (should (= (length (cdr r)) 1)))))
+
+(ert-deftest gitq-test--preview-frames/existing-branch-as-bare-source ()
+  "An existing branch name used as a bare source resolves and previews."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((r (gitq--preview-frames "main" #'gitq--parse-flat)))
+      (should (eq (car r) :ok))
+      (should (= (length (cdr r)) 1)))))
+
+(ert-deftest gitq-test--preview-frames/nonexistent-ref-is-not-ready ()
+  "A bare source naming no real ref previews as nil, not as an empty result."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (null (gitq--preview-frames "zzzz-does-not-exist" #'gitq--parse-flat)))))
+
+(ert-deftest gitq-test--preview-frames/destructive-terminal-not-applied ()
+  "Previewing a pipeline whose terminal is destructive must not run it."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((r (gitq--preview-frames
+              "commits /branch-off \"should-not-exist\"" #'gitq--parse-flat)))
+      (should (eq (car r) :ok))
+      (should (= (length (cdr r)) 1)))
+    (should (= (length (gitq--git "branch" "--list" "should-not-exist")) 0))))
+
+(ert-deftest gitq-test--preview-frames/pipe-syntax ()
+  "Preview also works with the pipe-syntax parser."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "commit by test user")
+    (let ((r (gitq--preview-frames
+              "commits | where .author contains \"Test\"" #'gitq--parse)))
+      (should (eq (car r) :ok))
+      (should (= (length (cdr r)) 1)))))
+
+(ert-deftest gitq-test--preview-frames/outside-repo-is-not-ready ()
+  "Outside a git repository, preview fails silently (nil), not with an error."
+  (let* ((dir (make-temp-file "gitq-test-norepo-" t))
+         (default-directory dir))
+    (unwind-protect
+        (should (null (gitq--preview-frames "commits" #'gitq--parse-flat)))
+      (delete-directory dir t))))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here
