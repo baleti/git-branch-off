@@ -1345,6 +1345,85 @@ No pipe character required."
     "/squash" "/reword" "/remove" "/delete" "/commit" "/stage" "/mark" "/worktree")
   "Terminal /command keywords.")
 
+(defconst gitq--complete-descriptions
+  '(;; sources
+    ("commits"   . "commits reachable from HEAD")
+    ("branches"  . "local branch refs")
+    ("tags"      . "tag refs")
+    ("refs"      . "all refs (branches, tags, ...)")
+    ("worktrees" . "linked worktrees")
+    ("blobs"     . "blob/tree entries under HEAD's tree")
+    ("HEAD"      . "the current commit")
+    ("in"        . "restrict commits to a revision range")
+    ;; steps
+    ("via"     . "traverse a morphism (parent, tree, diff, ...)")
+    ("where"   . "filter by field conditions")
+    ("grep"    . "search blob/commit content for a pattern")
+    ("pickaxe" . "filter commits whose diff adds/removes a pattern")
+    ("path"    . "filter by path glob")
+    ("pick"    . "project onto specific fields")
+    ("take"    . "keep the first N results")
+    ("skip"    . "drop the first N results")
+    ("first"   . "keep only the first result")
+    ("last"    . "keep only the last result")
+    ("sort"    . "sort by field (prefix with - for descending)")
+    ;; morphisms
+    (".parent"             . "first parent commit")
+    (".parent*"            . "all reachable ancestors, inclusive")
+    (".parent+"            . "all reachable ancestors, exclusive")
+    (".tree"               . "the commit's tree")
+    (".tree.blobs"         . "blob entries in the tree")
+    (".tree.subtrees"      . "subtree entries in the tree")
+    (".tree.entries"       . "all tree entries")
+    (".tree.entries[Blob]" . "blob entries only")
+    (".tree.entries[Tree]" . "subtree entries only")
+    (".diff"               . "paths changed vs. parent (or REF)")
+    (".diff.hunks"         . "line ranges changed vs. parent")
+    (".history"            . "commits that touched this path")
+    (".commit"             . "resolve to the referenced commit")
+    ;; field names
+    (".sha"           . "commit SHA")
+    (".author"        . "author name")
+    (".email"         . "author email")
+    (".date"          . "commit date")
+    (".message"       . "commit message")
+    (".path"          . "file path")
+    (".name"          . "ref/branch name")
+    (".branch"        . "worktree's branch")
+    (".parents-count" . "number of parents")
+    (".modified"      . "has modified/unstaged changes")
+    (".staged"        . "has staged changes")
+    (".untracked"     . "has untracked files")
+    ;; where operators
+    ("=="       . "equals")
+    ("!="       . "not equals")
+    (">"        . "greater than")
+    ("<"        . "less than")
+    (">="       . "greater or equal")
+    ("<="       . "less or equal")
+    ("contains" . "substring match")
+    ("matches"  . "regex match")
+    ("after"    . "date is after value")
+    ("before"   . "date is before value")
+    ("within"   . "date is within \"N day/week/month/year(s)\"")
+    ("is"       . "boolean flag is true")
+    ;; terminals
+    ("/show"       . "display results in the *gitq* buffer")
+    ("/copy"       . "copy the SHA of the first result")
+    ("/insert"     . "insert the SHA of the first result at point")
+    ("/count"      . "show the result count")
+    ("/branch-off" . "create a branch from the first result")
+    ("/amend"      . "amend HEAD with the first result")
+    ("/squash"     . "squash results into one commit")
+    ("/reword"     . "reword the first result's commit message")
+    ("/remove"     . "remove the first result's commit")
+    ("/delete"     . "delete the first result's commit")
+    ("/commit"     . "create a commit")
+    ("/stage"      . "stage modified files")
+    ("/mark"       . "attach a git note label")
+    ("/worktree"   . "add a worktree"))
+  "Short descriptions shown as completion annotations for gitq tokens.")
+
 (defun gitq--complete-candidates (input)
   "Return a list of completion candidates for the pipeline string INPUT.
 INPUT is everything typed so far; completions extend the last partial word."
@@ -1415,6 +1494,23 @@ complete and a new (empty) token is starting."
         (or (car (last (gitq--tokenize-flat trimmed))) "")
       "")))
 
+(defun gitq--affixate (candidates)
+  "Return CANDIDATES as (CAND PREFIX SUFFIX) triples for `completing-read'.
+SUFFIX is a short description from `gitq--complete-descriptions'.  This
+is supplied directly in the completion metadata (rather than left for
+Marginalia's category-based classifiers, which have nothing to match
+against a bespoke category like ours) so decorations show up with any
+`completing-read' front-end — Vertico, Marginalia, or vanilla."
+  (mapcar (lambda (c)
+            (let* ((key  (if (string-prefix-p "-" c) (substring c 1) c))
+                   (desc (cdr (assoc key gitq--complete-descriptions))))
+              (list c ""
+                    (if desc
+                        (propertize (concat "  " desc)
+                                    'face 'completions-annotations)
+                      ""))))
+          candidates))
+
 (defun gitq--completion-table (string predicate action)
   "Dynamic `completing-read' collection table for a growing gitq pipeline.
 Only the in-progress final token of STRING is completed; earlier tokens
@@ -1422,14 +1518,20 @@ are fixed context.  Candidates for that token come from
 `gitq--complete-candidates', which derives them from gitq's categorical
 step grammar — so Vertico shows the right set of keywords, morphisms,
 fields, operators, or terminals for the current position, and refreshes
-it live as each token is finished and the next one begins."
-  (if (eq (car-safe action) 'boundaries)
-      (cons 'boundaries
-            (cons (- (length string) (length (gitq--current-token string))) 0))
+it live as each token is finished and the next one begins.  Candidates
+are annotated via `gitq--affixate'."
+  (cond
+   ((eq action 'metadata)
+    '(metadata (category . gitq-token)
+               (affixation-function . gitq--affixate)))
+   ((eq (car-safe action) 'boundaries)
+    (cons 'boundaries
+          (cons (- (length string) (length (gitq--current-token string))) 0)))
+   (t
     (complete-with-action action
                           (gitq--complete-candidates string)
                           (gitq--current-token string)
-                          predicate)))
+                          predicate))))
 
 (defun gitq--read-pipeline (prompt)
   "Read a gitq pipeline with `completing-read', driven by Vertico.
