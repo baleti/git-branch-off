@@ -1538,6 +1538,21 @@ against a bespoke category like ours) so decorations show up with any
                       ""))))
           candidates))
 
+(defun gitq--token-kind (cand)
+  "Return a short category label for completion candidate CAND, or nil.
+Reflects gitq's own categorical grammar by checking which fixed
+candidate set CAND belongs to: a source keyword, a step keyword, a
+morphism path, a field name (optionally `sort'-negated with a leading
+\"-\"), a where-operator, or a terminal /command."
+  (let ((key (if (string-prefix-p "-" cand) (substring cand 1) cand)))
+    (cond
+     ((or (equal key "in") (member key gitq--complete-source-keywords)) "source")
+     ((member key gitq--flat-step-keywords)       "step")
+     ((member key gitq--complete-morphisms)        "morphism")
+     ((member key gitq--complete-field-names)      "field")
+     ((member key gitq--complete-where-operators)  "operator")
+     ((member key gitq--complete-terminals)        "terminal"))))
+
 (with-eval-after-load 'marginalia
   (declare-function marginalia--fields "ext:marginalia" t t)
   (defun gitq--marginalia-annotate (cand)
@@ -1551,11 +1566,18 @@ inserts the special \\='marginalia--align text property Marginalia's
 own alignment pass (`marginalia--align') looks for, plus the
 `marginalia-separator' gap. Returning a bare propertized string, as
 this used to, has neither, so nothing lines up and there is no visible
-separator at all."
+separator at all.
+
+Two fields are shown: `gitq--token-kind' (a fixed-width category tag,
+so the second field lines up too) and the description from
+`gitq--complete-descriptions'."
     (let* ((key  (if (string-prefix-p "-" cand) (substring cand 1) cand))
+           (kind (gitq--token-kind cand))
            (desc (cdr (assoc key gitq--complete-descriptions))))
-      (when desc
-        (marginalia--fields (desc :face 'marginalia-documentation)))))
+      (when (or kind desc)
+        (marginalia--fields
+         (kind :face 'marginalia-type :width 10)
+         (desc :face 'marginalia-documentation)))))
   (add-to-list 'marginalia-annotators
                '(gitq-token gitq--marginalia-annotate builtin none)))
 

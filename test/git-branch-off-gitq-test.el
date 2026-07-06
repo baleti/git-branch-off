@@ -1100,5 +1100,38 @@ preview is nil."
         (should (null (gitq--preview-frames "commits" #'gitq--parse-flat)))
       (delete-directory dir t))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--token-kind
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--token-kind/source ()
+  (should (equal (gitq--token-kind "commits") "source"))
+  (should (equal (gitq--token-kind "HEAD") "source"))
+  (should (equal (gitq--token-kind "in") "source")))
+
+(ert-deftest gitq-test--token-kind/step ()
+  (should (equal (gitq--token-kind "where") "step"))
+  (should (equal (gitq--token-kind "take") "step")))
+
+(ert-deftest gitq-test--token-kind/morphism ()
+  (should (equal (gitq--token-kind ".parent") "morphism"))
+  (should (equal (gitq--token-kind ".parent*") "morphism")))
+
+(ert-deftest gitq-test--token-kind/field ()
+  (should (equal (gitq--token-kind ".date") "field"))
+  ;; sort's negated "-.field" form must resolve the same as ".field".
+  (should (equal (gitq--token-kind "-.date") "field")))
+
+(ert-deftest gitq-test--token-kind/operator ()
+  (should (equal (gitq--token-kind "contains") "operator"))
+  (should (equal (gitq--token-kind "==") "operator")))
+
+(ert-deftest gitq-test--token-kind/terminal ()
+  (should (equal (gitq--token-kind "/show") "terminal"))
+  (should (equal (gitq--token-kind "/branch-off") "terminal")))
+
+(ert-deftest gitq-test--token-kind/unknown-is-nil ()
+  (should (null (gitq--token-kind "not-a-real-token"))))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here
