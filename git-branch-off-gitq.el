@@ -1539,14 +1539,23 @@ against a bespoke category like ours) so decorations show up with any
           candidates))
 
 (with-eval-after-load 'marginalia
+  (declare-function marginalia--fields "ext:marginalia" t t)
   (defun gitq--marginalia-annotate (cand)
     "Marginalia annotator for gitq completion candidate CAND.
 Registered under the `gitq-token' category so Marginalia users get its
-column alignment and `marginalia-documentation' face instead of the
-plain `gitq--affixate' fallback used by everyone else."
+column alignment instead of the plain `gitq--affixate' fallback used
+by everyone else.  Every built-in Marginalia annotator (see
+`marginalia-annotate-file', `marginalia-annotate-command', ...) builds
+its string via `marginalia--fields' — that macro is what actually
+inserts the special \\='marginalia--align text property Marginalia's
+own alignment pass (`marginalia--align') looks for, plus the
+`marginalia-separator' gap. Returning a bare propertized string, as
+this used to, has neither, so nothing lines up and there is no visible
+separator at all."
     (let* ((key  (if (string-prefix-p "-" cand) (substring cand 1) cand))
            (desc (cdr (assoc key gitq--complete-descriptions))))
-      (when desc (propertize desc 'face 'marginalia-documentation))))
+      (when desc
+        (marginalia--fields (desc :face 'marginalia-documentation)))))
   (add-to-list 'marginalia-annotators
                '(gitq-token gitq--marginalia-annotate builtin none)))
 
