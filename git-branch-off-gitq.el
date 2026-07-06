@@ -1554,30 +1554,45 @@ morphism path, a field name (optionally `sort'-negated with a leading
      ((member key gitq--complete-terminals)        "terminal"))))
 
 (with-eval-after-load 'marginalia
-  (declare-function marginalia--fields "ext:marginalia" t t)
+  (defvar marginalia-separator)
   (defun gitq--marginalia-annotate (cand)
     "Marginalia annotator for gitq completion candidate CAND.
 Registered under the `gitq-token' category so Marginalia users get its
 column alignment instead of the plain `gitq--affixate' fallback used
-by everyone else.  Every built-in Marginalia annotator (see
-`marginalia-annotate-file', `marginalia-annotate-command', ...) builds
-its string via `marginalia--fields' — that macro is what actually
-inserts the special \\='marginalia--align text property Marginalia's
-own alignment pass (`marginalia--align') looks for, plus the
-`marginalia-separator' gap. Returning a bare propertized string, as
-this used to, has neither, so nothing lines up and there is no visible
-separator at all.
+by everyone else.
 
-Two fields are shown: `gitq--token-kind' (a fixed-width category tag,
-so the second field lines up too) and the description from
+Deliberately NOT built via the `marginalia--fields'/`marginalia--field'
+macros that every built-in annotator uses (e.g. `marginalia-annotate-file')
+— those are only visible once Marginalia is actually loaded, which here
+only ever happens at runtime via this very `with-eval-after-load'.  A
+normal package build (e.g. straight.el's isolated per-package byte-
+compilation, which is exactly what triggered this) compiles this file
+with Marginalia NOT loaded, so the byte-compiler cannot see they are
+macros and instead compiles each field spec as a literal function call
+— `(kind :face ...)' becomes a call to a function named `kind', which
+does not exist, so the very first annotation attempt fails with
+`(void-function kind)'.  Confirmed by byte-compiling this file in
+isolation and loading the resulting .elc against a real Marginalia.
+
+This version only reads the public `marginalia-separator' variable and
+applies the same `\\='marginalia--align' text property protocol that
+`marginalia--align' (Marginalia's own alignment pass) looks for — all
+plain runtime data (`propertize'/`concat'/`format'), so there is no
+macro expansion left to go stale at compile time.
+
+Two fields are shown: `gitq--token-kind' (padded to a fixed width, so
+the second field lines up too) and the description from
 `gitq--complete-descriptions'."
     (let* ((key  (if (string-prefix-p "-" cand) (substring cand 1) cand))
            (kind (gitq--token-kind cand))
            (desc (cdr (assoc key gitq--complete-descriptions))))
       (when (or kind desc)
-        (marginalia--fields
-         (kind :face 'marginalia-type :width 10)
-         (desc :face 'marginalia-documentation)))))
+        (concat
+         (propertize " " 'marginalia--align t)
+         marginalia-separator
+         (propertize (format "%-10s" (or kind "")) 'face 'marginalia-type)
+         marginalia-separator
+         (propertize (or desc "") 'face 'marginalia-documentation)))))
   (add-to-list 'marginalia-annotators
                '(gitq-token gitq--marginalia-annotate builtin none)))
 
