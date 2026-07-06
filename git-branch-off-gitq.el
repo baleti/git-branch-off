@@ -1372,6 +1372,13 @@ No pipe character required."
     "/squash" "/reword" "/remove" "/delete" "/commit" "/stage" "/mark" "/worktree")
   "Terminal /command keywords.")
 
+(defconst gitq--complete-date-within-examples
+  '("1 day" "3 days" "1 week" "2 weeks" "1 month" "3 months" "6 months" "1 year")
+  "Example duration values for the `within' where-operator on `.date'.
+`within' takes a duration (\"N day/week/month/year(s)\"), not a literal
+date, so it gets its own candidate set instead of `.date's usual list
+of real commit dates.")
+
 (defconst gitq--complete-descriptions
   '(;; sources
     ("commits"   . "commits reachable from HEAD")
@@ -1448,8 +1455,52 @@ No pipe character required."
     ("/commit"     . "create a commit")
     ("/stage"      . "stage modified files")
     ("/mark"       . "attach a git note label")
-    ("/worktree"   . "add a worktree"))
+    ("/worktree"   . "add a worktree")
+    ("no-edit"     . "reuse HEAD's existing commit message"))
   "Short descriptions shown as completion annotations for gitq tokens.")
+
+(defun gitq--complete-refs ()
+  "Return local branch and tag names, for contexts expecting a ref."
+  (ignore-errors
+    (append (gitq--git "branch" "--format=%(refname:short)")
+            (gitq--git "tag" "--list"))))
+
+(defun gitq--complete--enclosing-step (ctx)
+  "Return the most recent step keyword in CTX, or nil.
+CTX is the list of fully-typed tokens so far.  Comma-separated lists
+(`where' conditions, `pick' fields) can put arbitrarily many tokens
+between the stage keyword that opened them and the token currently
+being completed, so callers that need to know \"which stage is this
+token part of\" (e.g. deciding whether a `.field' takes a where-operator
+next) should use this instead of just looking at the immediately
+preceding token."
+  (car (last (seq-filter (lambda (tok) (member tok gitq--flat-step-keywords)) ctx))))
+
+(defun gitq--complete-where-values (field op)
+  "Return completion candidates for a where-condition's value, or nil.
+FIELD is the preceding \".field\" token; OP is the where-operator that
+was just typed.  Returns nil (free text, no candidates) for fields
+with no natural, git-derivable value domain: `.message' (arbitrary,
+often multi-line text), `.parents-count' (an arbitrary integer), and
+the boolean flags `.modified'/`.staged'/`.untracked' (used as bare
+flags — a literal \"true\"/\"false\" string would never actually match,
+since the parser compares values with `equal', so offering either
+would be actively misleading)."
+  (cond
+   ((and (equal field ".date") (equal op "within"))
+    gitq--complete-date-within-examples)
+   ((equal field ".author")
+    (ignore-errors (delete-dups (gitq--git "log" "--format=%an" "--all"))))
+   ((equal field ".email")
+    (ignore-errors (delete-dups (gitq--git "log" "--format=%ae" "--all"))))
+   ((equal field ".date")
+    (ignore-errors (delete-dups (gitq--git "log" "--format=%ai" "--all"))))
+   ((equal field ".sha")
+    (ignore-errors (delete-dups (gitq--git "log" "--format=%h" "--all"))))
+   ((equal field ".path")
+    (ignore-errors (delete-dups (gitq--git "log" "--all" "--name-only" "--format="))))
+   ((member field '(".name" ".branch"))
+    (gitq--complete-refs))))
 
 (defun gitq--complete-candidates (input)
   "Return a list of completion candidates for the pipeline string INPUT.
@@ -1475,21 +1526,27 @@ INPUT is everything typed so far; completions extend the last partial word."
 
      ;; After "commits in" → branch and tag names from git
      ((and (equal last-ctx "in") (equal prev-ctx "commits"))
-      (ignore-errors
-        (append (gitq--git "branch" "--format=%(refname:short)")
-                (gitq--git "tag" "--list"))))
+      (gitq--complete-refs))
 
      ;; After "via" → morphisms
      ((equal last-ctx "via")
       gitq--complete-morphisms)
 
+     ;; After ".diff" (the one morphism with an optional trailing REF
+     ;; argument) → offer refs, but also let the user skip straight to
+     ;; a step/terminal since the REF is optional.
+     ((and (equal last-ctx ".diff") (equal prev-ctx "via"))
+      (append (gitq--complete-refs) gitq--flat-step-keywords gitq--complete-terminals))
+
      ;; After "where" or "," (start of another condition) → field names
      ((or (equal last-ctx "where") (equal last-ctx ","))
       gitq--complete-field-names)
 
-     ;; After a .field not preceded by "via" or "sort" → where operators
+     ;; After a .field that is part of a `where' clause → where
+     ;; operators.  `sort'/`pick' fields, and morphism paths after
+     ;; `via' (which also start with "."), never take one.
      ((and last-ctx (string-prefix-p "." last-ctx)
-           (not (member prev-ctx '("via" "sort"))))
+           (equal (gitq--complete--enclosing-step ctx) "where"))
       gitq--complete-where-operators)
 
      ;; After "sort" → field names with optional "-" negation prefix
@@ -1502,15 +1559,21 @@ INPUT is everything typed so far; completions extend the last partial word."
           (and (equal last-ctx ",") (member "pick" ctx)))
       gitq--complete-field-names)
 
-     ;; After a where-operator → dynamic values (authors etc.)
+     ;; After a where-operator → dynamic values (authors, dates, paths,
+     ;; refs, sha's, ...) — see `gitq--complete-where-values'.
      ((member last-ctx gitq--complete-where-operators)
-      (let ((field (when (> n 1) (nth (- n 2) ctx))))
-        (when (member field '(".author" ".email"))
-          (ignore-errors
-            (delete-dups (gitq--git "log" "--format=%an" "--all"))))))
+      (gitq--complete-where-values (when (> n 1) (nth (- n 2) ctx)) last-ctx))
 
-     ;; Otherwise → step keywords + terminals
-     (t (append gitq--flat-step-keywords gitq--complete-terminals)))))
+     ;; After a terminal: only its own optional argument (if any) may
+     ;; follow — never more steps/terminals, since a terminal always
+     ;; ends the pipeline.
+     ((gitq--flat-terminal-p last-ctx)
+      (when (equal last-ctx "/amend") '("no-edit")))
+
+     ;; Otherwise → step keywords + terminals, plus "," to continue a
+     ;; still-open where/pick comma-list.
+     (t (append (and (member (gitq--complete--enclosing-step ctx) '("where" "pick")) '(","))
+                gitq--flat-step-keywords gitq--complete-terminals)))))
 
 (defun gitq--current-token (string)
   "Return the in-progress partial token at the end of STRING, or \"\".
