@@ -4,6 +4,8 @@
 ;; Syntax: source | step | step | terminal
 ;; Example: (gitq "commits | where .author contains \"alice\" | take 5 | show")
 
+(require 'cl-lib)
+
 ;;; Git execution layer
 
 (defun gitq--git (&rest args)
@@ -957,6 +959,22 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
 
 (defvar gitq--history nil "Minibuffer history list for `gitq-interactive'.")
 
+(defun gitq--exec-nodes (nodes)
+  "Execute parsed pipeline NODES (a source, zero or more steps, optional terminal).
+Returns (RESULT . TERMINAL-NODE-OR-NIL).  The terminal, if any, is
+identified and stripped out but never applied here — callers decide
+whether to run it for real (`gitq--apply-terminal') or ignore it
+entirely for a read-only preview (`gitq--preview-frames')."
+  (let* ((src-node (car nodes))
+         (rest     (cdr nodes))
+         (last     (car (last rest)))
+         (is-term  (and last (eq (plist-get last :type) 'terminal)))
+         (steps    (if is-term (butlast rest) rest))
+         (terminal (when is-term last))
+         (frames   (gitq--exec-source src-node))
+         (result   (cl-reduce #'gitq--exec-step steps :initial-value frames)))
+    (cons result terminal)))
+
 ;;;###autoload
 (defun gitq (pipeline)
   "Execute a GitQ PIPELINE string in the current git repository.
@@ -969,24 +987,22 @@ Steps:     via MORPHISM  where COND[, COND...]  grep PATTERN  pickaxe PATTERN
 Terminals: show  copy  insert  count  branch-off [NAME]  amend [no-edit|MSG]
            squash [MSG]  reword [MSG]  remove  commit [MSG]
 
+While typing, a read-only preview of the source and steps (ignoring
+any terminal) appears in the *gitq* buffer as soon as they parse and
+execute cleanly, without taking focus away from the minibuffer.
+
 Examples:
   (gitq \"commits | where .author contains \\\"alice\\\" | take 10 | show\")
   (gitq \"HEAD | via .parent* | take 3 | squash \\\"consolidated\\\"\")
   (gitq \"commits | where .message contains \\\"fix\\\" | pick .sha, .date, .message\")"
-  (interactive (list (gitq--read-pipeline "gitq (pipe syntax)> ")))
+  (interactive (list (gitq--read-pipeline "gitq (pipe syntax)> " #'gitq--parse)))
   (let* ((default-directory (gitq--toplevel))
-         (nodes    (gitq--parse pipeline))
-         (src-node (car nodes))
-         (rest     (cdr nodes))
-         (last     (car (last rest)))
-         (is-term  (and last (eq (plist-get last :type) 'terminal)))
-         (steps    (if is-term (butlast rest) rest))
-         (terminal (when is-term last)))
-    (let* ((frames (gitq--exec-source src-node))
-           (result (cl-reduce #'gitq--exec-step steps :initial-value frames)))
-      (if terminal
-          (gitq--apply-terminal result terminal pipeline)
-        (gitq--display result pipeline)))))
+         (exec     (gitq--exec-nodes (gitq--parse pipeline)))
+         (result   (car exec))
+         (terminal (cdr exec)))
+    (if terminal
+        (gitq--apply-terminal result terminal pipeline)
+      (gitq--display result pipeline))))
 
 ;;;###autoload
 (defun gitq-interactive ()
@@ -1571,7 +1587,10 @@ Step keywords are reserved: quote them when used as values.
 
 Context-aware candidates for the current token appear as soon as the
 minibuffer opens (via Vertico or any other `completing-read' UI), and
-update live as each token is completed and the next one begins.
+update live as each token is completed and the next one begins.  A
+read-only preview of the source and steps (ignoring any terminal) also
+appears in the *gitq* buffer as soon as they parse and execute
+cleanly, without taking focus away from the minibuffer.
 
 Examples:
   (gitq-flat \"commits take 10 /show\")
@@ -1580,18 +1599,12 @@ Examples:
   (gitq-flat \"commits in main..HEAD sort -.date /show\")"
   (interactive (list (gitq--read-pipeline "gitq> ")))
   (let* ((default-directory (gitq--toplevel))
-         (nodes    (gitq--parse-flat pipeline))
-         (src-node (car nodes))
-         (rest     (cdr nodes))
-         (last     (car (last rest)))
-         (is-term  (and last (eq (plist-get last :type) 'terminal)))
-         (steps    (if is-term (butlast rest) rest))
-         (terminal (when is-term last)))
-    (let* ((frames (gitq--exec-source src-node))
-           (result (cl-reduce #'gitq--exec-step steps :initial-value frames)))
-      (if terminal
-          (gitq--apply-terminal result terminal pipeline)
-        (gitq--display result pipeline)))))
+         (exec     (gitq--exec-nodes (gitq--parse-flat pipeline)))
+         (result   (car exec))
+         (terminal (cdr exec)))
+    (if terminal
+        (gitq--apply-terminal result terminal pipeline)
+      (gitq--display result pipeline))))
 
 (provide 'git-branch-off-gitq)
 ;;; git-branch-off-gitq.el ends here
