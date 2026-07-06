@@ -1133,5 +1133,179 @@ preview is nil."
 (ert-deftest gitq-test--token-kind/unknown-is-nil ()
   (should (null (gitq--token-kind "not-a-real-token"))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--complete--enclosing-step
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--enclosing-step/where ()
+  (should (equal (gitq--complete--enclosing-step '("commits" "where" ".author" "==" "\"a\""))
+                 "where")))
+
+(ert-deftest gitq-test--enclosing-step/skips-over-comma-and-fields ()
+  "The most recent stage keyword is found even across a comma-separated list."
+  (should (equal (gitq--complete--enclosing-step
+                  '("commits" "pick" ".sha" "," ".author" "," ".date"))
+                 "pick")))
+
+(ert-deftest gitq-test--enclosing-step/most-recent-wins ()
+  "A later step keyword shadows an earlier one."
+  (should (equal (gitq--complete--enclosing-step
+                  '("commits" "where" ".author" "==" "\"a\"" "via" ".parent"))
+                 "via")))
+
+(ert-deftest gitq-test--enclosing-step/none ()
+  (should (null (gitq--complete--enclosing-step '("commits")))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--complete-where-values
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--complete-where-values/date-within-is-duration-examples ()
+  "`within' gets duration examples, not literal dates, and needs no repo."
+  (should (equal (gitq--complete-where-values ".date" "within")
+                 gitq--complete-date-within-examples)))
+
+(ert-deftest gitq-test--complete-where-values/freeform-fields-return-nil ()
+  "Fields with no git-derivable value domain stay free-text."
+  (should (null (gitq--complete-where-values ".message" "contains")))
+  (should (null (gitq--complete-where-values ".parents-count" ">")))
+  (should (null (gitq--complete-where-values ".modified" "is")))
+  (should (null (gitq--complete-where-values ".staged" "is")))
+  (should (null (gitq--complete-where-values ".untracked" "is"))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--complete-candidates — where-value completion
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--complete-candidates/email-uses-email-not-name ()
+  "`.email' must complete against addresses, not author display names."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((cands (gitq--complete-candidates "commits where .email == ")))
+      (should (member "test@example.com" cands))
+      (should-not (member "Test User" cands)))))
+
+(ert-deftest gitq-test--complete-candidates/author ()
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (member "Test User" (gitq--complete-candidates "commits where .author == ")))))
+
+(ert-deftest gitq-test--complete-candidates/date-returns-real-dates ()
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((cands (gitq--complete-candidates "commits where .date == ")))
+      (should (= (length cands) 1))
+      (should (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}" (car cands))))))
+
+(ert-deftest gitq-test--complete-candidates/date-after-also-gets-real-dates ()
+  "Every where-operator on `.date' (not just `==') gets the same date list."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (gitq--complete-candidates "commits where .date after "))))
+
+(ert-deftest gitq-test--complete-candidates/path-same-list-for-eq-and-contains ()
+  "`.path == ' and `.path contains ' must offer the identical candidate set."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "a.txt" "x\n" "add a")
+    (gitq-test--commit "b.txt" "y\n" "add b")
+    (let ((eq-cands       (gitq--complete-candidates "commits where .path == "))
+          (contains-cands (gitq--complete-candidates "commits where .path contains ")))
+      (should (member "a.txt" eq-cands))
+      (should (member "b.txt" eq-cands))
+      (should (equal eq-cands contains-cands)))))
+
+(ert-deftest gitq-test--complete-candidates/name-and-branch-are-refs ()
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (call-process "git" nil nil nil "tag" "v1.0")
+    (let ((name-cands   (gitq--complete-candidates "commits where .name == "))
+          (branch-cands (gitq--complete-candidates "commits where .branch == ")))
+      (should (member "main" name-cands))
+      (should (member "v1.0" name-cands))
+      (should (equal name-cands branch-cands)))))
+
+(ert-deftest gitq-test--complete-candidates/sha ()
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((cands (gitq--complete-candidates "commits where .sha == ")))
+      (should (= (length cands) 1))
+      (should (string-match-p "^[0-9a-f]+$" (car cands))))))
+
+(ert-deftest gitq-test--complete-candidates/message-and-boolean-flags-stay-freeform ()
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (null (gitq--complete-candidates "commits where .message contains ")))
+    (should (null (gitq--complete-candidates "commits where .modified is ")))
+    (should (null (gitq--complete-candidates "commits where .parents-count > ")))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--complete-candidates — pick/sort/where comma-list correctness
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--complete-candidates/pick-field-never-offers-operators ()
+  "pick fields are a plain comma list; they must never suggest ==, contains, etc."
+  (let ((cands (gitq--complete-candidates "commits pick .sha ")))
+    (should-not (member "==" cands))
+    (should-not (member "contains" cands))
+    (should (member "," cands))
+    (should (member "where" cands))))
+
+(ert-deftest gitq-test--complete-candidates/pick-comma-continues-with-field-names ()
+  (let ((cands (gitq--complete-candidates "commits pick .sha, ")))
+    (should (member ".author" cands))
+    (should-not (member "," cands))))
+
+(ert-deftest gitq-test--complete-candidates/sort-field-never-offers-comma ()
+  "sort takes exactly one field; unlike where/pick it has no comma-list."
+  (let ((cands (gitq--complete-candidates "commits sort .date ")))
+    (should-not (member "," cands))
+    (should-not (member "==" cands))))
+
+(ert-deftest gitq-test--complete-candidates/where-condition-offers-comma-to-continue ()
+  "After a complete where-value, \",\" should be offered to add another condition."
+  (let ((cands (gitq--complete-candidates "commits where .author == \"Alice\" ")))
+    (should (member "," cands))
+    (should (member "where" cands))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--complete-candidates — .diff optional ref, terminals
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--complete-candidates/diff-offers-refs-and-steps ()
+  "`.diff's REF argument is optional: offer refs, but also let the user
+skip straight to a step or terminal."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (let ((cands (gitq--complete-candidates "HEAD via .diff ")))
+      (should (member "main" cands))
+      (should (member "where" cands))
+      (should (member "/show" cands)))))
+
+(ert-deftest gitq-test--complete-candidates/amend-offers-no-edit ()
+  (should (equal (gitq--complete-candidates "commits /amend ") '("no-edit"))))
+
+(ert-deftest gitq-test--complete-candidates/other-terminals-offer-nothing ()
+  "A terminal always ends the pipeline; only /amend has a known-shape argument."
+  (should (null (gitq--complete-candidates "commits /branch-off ")))
+  (should (null (gitq--complete-candidates "commits /mark ")))
+  (should (null (gitq--complete-candidates "commits /count "))))
+
+(ert-deftest gitq-test--complete-candidates/commits-in-still-offers-refs ()
+  "commits-in completion still works after being refactored onto
+`gitq--complete-refs'."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init")
+    (should (member "main" (gitq--complete-candidates "commits in ")))))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here
