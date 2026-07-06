@@ -1511,6 +1511,18 @@ against a bespoke category like ours) so decorations show up with any
                       ""))))
           candidates))
 
+(with-eval-after-load 'marginalia
+  (defun gitq--marginalia-annotate (cand)
+    "Marginalia annotator for gitq completion candidate CAND.
+Registered under the `gitq-token' category so Marginalia users get its
+column alignment and `marginalia-documentation' face instead of the
+plain `gitq--affixate' fallback used by everyone else."
+    (let* ((key  (if (string-prefix-p "-" cand) (substring cand 1) cand))
+           (desc (cdr (assoc key gitq--complete-descriptions))))
+      (when desc (propertize desc 'face 'marginalia-documentation))))
+  (add-to-list 'marginalia-annotators
+               '(gitq-token gitq--marginalia-annotate builtin none)))
+
 (defun gitq--completion-table (string predicate action)
   "Dynamic `completing-read' collection table for a growing gitq pipeline.
 Only the in-progress final token of STRING is completed; earlier tokens
