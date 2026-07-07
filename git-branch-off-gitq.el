@@ -620,8 +620,20 @@ and selecting its window."
 Used to preview a pipeline still being typed in the minibuffer: results
 appear right away, above the minibuffer, taking over the whole frame
 \(display-buffer-full-frame\) rather than splitting it in half, without
-taking focus away from typing."
-  (display-buffer (gitq--render frames pipeline-str) '(display-buffer-full-frame)))
+taking focus away from typing.
+
+`display-buffer-full-frame' does its work via `delete-other-windows',
+which selects its target window as a side effect regardless of what
+was selected before the call -- confirmed directly: it silently stole
+window selection away from the active minibuffer read on every preview
+tick, so the very next keystroke (e.g. a space right after
+autocompleting a token) went to the now-selected *gitq* buffer instead
+of the minibuffer. Restoring the previously selected window
+immediately afterward keeps focus exactly where typing expects it."
+  (let ((previously-selected (selected-window)))
+    (display-buffer (gitq--render frames pipeline-str) '(display-buffer-full-frame))
+    (when (window-live-p previously-selected)
+      (select-window previously-selected))))
 
 (defun gitq-results-visit ()
   "Visit the git object at point in the *gitq* buffer."
