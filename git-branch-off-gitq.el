@@ -624,6 +624,13 @@ compare lexically, which for ISO dates is chronological order."
   :interactive nil
   (setq truncate-lines t))
 
+(defvar-local gitq--buffer-pipeline nil
+  "The pipeline string that produced this `gitq-results-mode' buffer.
+Set by `gitq--render' after the major mode is turned on (major modes
+call `kill-all-local-variables', which would otherwise wipe it).  Read
+by `gitq' so re-invoking it from a results buffer re-populates the
+minibuffer with the query that built that buffer.")
+
 (defun gitq--insert-frame (frame)
   "Insert a human-readable line for FRAME into the current buffer."
   (let ((type  (plist-get frame :type))
@@ -693,6 +700,7 @@ compare lexically, which for ISO dates is chronological order."
           (dolist (f frames) (gitq--insert-frame f))
         (insert "(no results)\n"))
       (gitq-results-mode)
+      (setq gitq--buffer-pipeline pipeline-str)
       (goto-char (point-min)))
     (current-buffer)))
 
@@ -2090,7 +2098,7 @@ prompt, same as if the text had been typed by hand."
 Only active while reading a gitq pipeline, not in `completing-read'
 prompts generally.")
 
-(defun gitq--read-pipeline (prompt)
+(defun gitq--read-pipeline (prompt &optional initial-input)
   "Read a gitq pipeline with `completing-read', driven by Vertico.
 Backed by `gitq--completion-table', so the full candidate set for the
 current pipeline position is shown as soon as the prompt opens, and
@@ -2104,6 +2112,10 @@ resulting frames are shown read-only in the *gitq* buffer via
 focus stays in the minibuffer so typing is uninterrupted.  Pressing RET
 hands the final string back to the caller, which runs the pipeline for
 real, terminal included.
+
+INITIAL-INPUT, if non-nil, pre-fills the minibuffer (e.g. with the
+pipeline that produced the results buffer `gitq' was invoked from; see
+`gitq--buffer-pipeline').
 
 \\`C-r' opens a history search over previously-run pipelines; see
 `gitq--history-search'."
@@ -2128,7 +2140,8 @@ real, terminal included.
            (add-hook 'post-command-hook #'schedule nil t)))
       (unwind-protect
           (minibuffer-with-setup-hook #'setup
-            (completing-read prompt #'gitq--completion-table nil nil nil 'gitq--history))
+            (completing-read prompt #'gitq--completion-table nil nil
+                              initial-input 'gitq--history))
         (when timer (cancel-timer timer))))))
 
 ;;;###autoload
@@ -2171,8 +2184,15 @@ Examples:
   (gitq \"commits take 10 /show\")
   (gitq \"commits where author contains \\\"alice\\\" take 5 /count\")
   (gitq \"HEAD via .parent* where message contains \\\"fix\\\" /show\")
-  (gitq \"commits in main..HEAD sort -date /show\")"
-  (interactive (list (gitq--read-pipeline "gitq> ")))
+  (gitq \"commits in main..HEAD sort -date /show\")
+
+Invoked from a `gitq-results-mode' buffer, the minibuffer is
+pre-filled with the pipeline that produced it, ready to tweak and
+re-run."
+  (interactive
+   (list (gitq--read-pipeline "gitq> "
+                               (when (derived-mode-p 'gitq-results-mode)
+                                 gitq--buffer-pipeline))))
   (let* ((default-directory (gitq--toplevel))
          (exec     (gitq--exec-nodes (gitq--parse-flat pipeline)))
          (result   (car exec))
