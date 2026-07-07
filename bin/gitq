@@ -90,10 +90,10 @@
   (message "")
   (message "Examples:")
   (message "  gitq 'commits take 10'")
-  (message "  gitq 'commits where .author contains \"alice\" /show'")
+  (message "  gitq 'commits where author contains \"alice\" /show'")
   (message "  gitq 'commits in main..HEAD /count'")
   (message "  gitq 'branches'")
-  (message "  gitq 'HEAD via .parent* where .message contains \"fix\"'")
+  (message "  gitq 'HEAD via .parent* where message contains \"fix\"'")
   (message "")
   (message "Set GITQ_LIB=/dir to override the path to git-branch-off-gitq.el"))
 

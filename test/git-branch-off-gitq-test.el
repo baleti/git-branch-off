@@ -183,7 +183,7 @@
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-where/equality ()
-  (let* ((nodes (gitq--parse-flat "commits where .author == \"alice\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where author == \"alice\" /show"))
          (where (nth 1 nodes))
          (cond  (car (plist-get where :conditions))))
     (should (eq (plist-get where :type) 'where))
@@ -192,19 +192,19 @@
     (should (equal (plist-get cond :value) "alice"))))
 
 (ert-deftest gitq-test--parse-where/contains ()
-  (let* ((nodes (gitq--parse-flat "commits where .message contains \"fix\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where message contains \"fix\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'contains))
     (should (equal (plist-get cond :value) "fix"))))
 
 (ert-deftest gitq-test--parse-where/matches-regex ()
-  (let* ((nodes (gitq--parse-flat "commits where .message matches /^feat:/ /show"))
+  (let* ((nodes (gitq--parse-flat "commits where message matches /^feat:/ /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'matches))
     (should (equal (plist-get cond :value) "^feat:"))))
 
 (ert-deftest gitq-test--parse-where/numeric-gt ()
-  (let* ((nodes (gitq--parse-flat "commits where .parents.count > 1 /show"))
+  (let* ((nodes (gitq--parse-flat "commits where parents-count > 1 /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :field) 'parents-count))
     (should (eq (plist-get cond :op) '>))
@@ -212,34 +212,34 @@
 
 (ert-deftest gitq-test--parse-where/multiple-conditions ()
   "Multiple where conditions separated by commas."
-  (let* ((nodes (gitq--parse-flat "commits where .author == \"alice\", .message contains \"fix\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where author == \"alice\", message contains \"fix\" /show"))
          (conds (plist-get (nth 1 nodes) :conditions)))
     (should (= (length conds) 2))
     (should (eq (plist-get (nth 0 conds) :field) 'author))
     (should (eq (plist-get (nth 1 conds) :field) 'message))))
 
 (ert-deftest gitq-test--parse-where/bare-flag ()
-  "Bare .modified flag (no op/value)."
-  (let* ((nodes (gitq--parse-flat "worktree where .modified /show"))
+  "Bare modified flag (no op/value)."
+  (let* ((nodes (gitq--parse-flat "worktree where modified /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :field) 'modified))
     (should (eq (plist-get cond :op)    'is))
     (should (eq (plist-get cond :value) t))))
 
 (ert-deftest gitq-test--parse-where/after ()
-  (let* ((nodes (gitq--parse-flat "commits where .date after \"2024-01-01\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where date after \"2024-01-01\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'after))
     (should (equal (plist-get cond :value) "2024-01-01"))))
 
 (ert-deftest gitq-test--parse-where/within ()
-  (let* ((nodes (gitq--parse-flat "commits where .date within \"30 days\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where date within \"30 days\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'within))
     (should (equal (plist-get cond :value) "30 days"))))
 
 (ert-deftest gitq-test--parse-where/sha-equality ()
-  (let* ((nodes (gitq--parse-flat "commits where .sha == \"a3f9b2\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where sha == \"a3f9b2\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (equal (plist-get cond :value) "a3f9b2"))))
 
@@ -248,13 +248,13 @@
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-pick/single-field ()
-  (let* ((nodes (gitq--parse-flat "commits pick .sha /show"))
+  (let* ((nodes (gitq--parse-flat "commits pick sha /show"))
          (pick  (nth 1 nodes)))
     (should (eq (plist-get pick :type) 'pick))
     (should (equal (plist-get pick :fields) '(sha)))))
 
 (ert-deftest gitq-test--parse-pick/multiple-fields ()
-  (let* ((nodes (gitq--parse-flat "commits pick .sha, .message, .author /show"))
+  (let* ((nodes (gitq--parse-flat "commits pick sha, message, author /show"))
          (pick  (nth 1 nodes)))
     (should (equal (plist-get pick :fields) '(sha message author)))))
 
@@ -285,14 +285,14 @@
     (should (eq (plist-get step :type) 'last))))
 
 (ert-deftest gitq-test--parse-sort/ascending ()
-  (let* ((nodes (gitq--parse-flat "commits sort .date /show"))
+  (let* ((nodes (gitq--parse-flat "commits sort date /show"))
          (sort  (nth 1 nodes)))
     (should (eq (plist-get sort :type) 'sort))
     (should (eq (plist-get sort :field) 'date))
     (should (null (plist-get sort :desc)))))
 
 (ert-deftest gitq-test--parse-sort/descending ()
-  (let* ((nodes (gitq--parse-flat "commits sort -.date /show"))
+  (let* ((nodes (gitq--parse-flat "commits sort -date /show"))
          (sort  (nth 1 nodes)))
     (should (eq (plist-get sort :field) 'date))
     (should (plist-get sort :desc))))
@@ -436,12 +436,12 @@ grep itself never sets :path-filter."
 
 (ert-deftest gitq-test--parse/pipeline-length ()
   "A 4-stage pipeline parses to 4 nodes."
-  (let ((nodes (gitq--parse-flat "commits where .author == \"alice\" take 10 /show")))
+  (let ((nodes (gitq--parse-flat "commits where author == \"alice\" take 10 /show")))
     (should (= (length nodes) 4))))
 
 (ert-deftest gitq-test--parse/pipeline-types ()
   "Node types are source, where, take, terminal in order."
-  (let ((nodes (gitq--parse-flat "commits where .author == \"alice\" take 10 /show")))
+  (let ((nodes (gitq--parse-flat "commits where author == \"alice\" take 10 /show")))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'where))
     (should (eq (plist-get (nth 2 nodes) :type) 'take))
@@ -454,7 +454,7 @@ grep itself never sets :path-filter."
 (ert-deftest gitq-test--parse/complex-pipeline ()
   "Example 3 from spec: commits introducing a string via pickaxe."
   (let* ((nodes (gitq--parse-flat
-                 "commits via .diff pickaxe \"SecretKey\" pick .sha, .date, .author, .path"))
+                 "commits via .diff pickaxe \"SecretKey\" pick sha, date, author, path"))
          (src   (nth 0 nodes))
          (via   (nth 1 nodes))
          (pa    (nth 2 nodes))
@@ -880,13 +880,13 @@ index abc..def 100644\n\
         (should (> (buffer-size) 0))))))
 
 (ert-deftest gitq-test--integration/full-query-where-message ()
-  "commits where .message contains X /show filters correctly."
+  "commits where message contains X /show filters correctly."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "a.txt" "1\n" "fix: auth issue")
     (gitq-test--commit "b.txt" "2\n" "feat: new widget")
     (gitq-test--commit "c.txt" "3\n" "fix: logging bug")
-    (gitq "commits where .message contains \"fix\" /show")
+    (gitq "commits where message contains \"fix\" /show")
     (let ((buf (get-buffer "*gitq*")))
       (with-current-buffer buf
         ;; Should show 2 fix commits, not the feat one
@@ -980,7 +980,7 @@ preview is nil."
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "commit by test user")
     (let ((r (gitq--preview-frames
-              "commits where .author contains \"Test\"")))
+              "commits where author contains \"Test\"")))
       (should (eq (car r) :ok))
       (should (= (length (cdr r)) 1)))))
 
@@ -1037,9 +1037,9 @@ preview is nil."
   (should (equal (gitq--token-kind ".parent*") "morphism")))
 
 (ert-deftest gitq-test--token-kind/field ()
-  (should (equal (gitq--token-kind ".date") "field"))
-  ;; sort's negated "-.field" form must resolve the same as ".field".
-  (should (equal (gitq--token-kind "-.date") "field")))
+  (should (equal (gitq--token-kind "date") "field"))
+  ;; sort's negated "-field" form must resolve the same as "field".
+  (should (equal (gitq--token-kind "-date") "field")))
 
 (ert-deftest gitq-test--token-kind/operator ()
   (should (equal (gitq--token-kind "contains") "operator"))
@@ -1057,23 +1057,36 @@ preview is nil."
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--enclosing-step/where ()
-  (should (equal (gitq--complete--enclosing-step '("commits" "where" ".author" "==" "\"a\""))
+  (should (equal (gitq--complete--enclosing-step '("commits" "where" "author" "==" "\"a\""))
                  "where")))
 
 (ert-deftest gitq-test--enclosing-step/skips-over-comma-and-fields ()
   "The most recent stage keyword is found even across a comma-separated list."
   (should (equal (gitq--complete--enclosing-step
-                  '("commits" "pick" ".sha" "," ".author" "," ".date"))
+                  '("commits" "pick" "sha" "," "author" "," "date"))
                  "pick")))
 
 (ert-deftest gitq-test--enclosing-step/most-recent-wins ()
   "A later step keyword shadows an earlier one."
   (should (equal (gitq--complete--enclosing-step
-                  '("commits" "where" ".author" "==" "\"a\"" "via" ".parent"))
+                  '("commits" "where" "author" "==" "\"a\"" "via" ".parent"))
                  "via")))
 
 (ert-deftest gitq-test--enclosing-step/none ()
   (should (null (gitq--complete--enclosing-step '("commits")))))
+
+(ert-deftest gitq-test--enclosing-step/path-field-not-mistaken-for-path-step ()
+  "`path' inside an open `where'/`pick' resolves as a field continuing that
+stage, not as a fresh `path' step -- see `gitq--field-names' docstring."
+  (should (equal (gitq--complete--enclosing-step '("commits" "pick" "path"))
+                 "pick"))
+  (should (equal (gitq--complete--enclosing-step '("commits" "where" "path"))
+                 "where"))
+  (should (equal (gitq--complete--enclosing-step '("commits" "where" "modified" "path"))
+                 "where"))
+  ;; But a genuine standalone `path' step is still recognized as such.
+  (should (equal (gitq--complete--enclosing-step '("commits" "take" "5" "path"))
+                 "path")))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--complete-where-values
@@ -1081,27 +1094,27 @@ preview is nil."
 
 (ert-deftest gitq-test--complete-where-values/date-within-is-duration-examples ()
   "`within' gets duration examples, not literal dates, and needs no repo."
-  (should (equal (gitq--complete-where-values ".date" "within")
+  (should (equal (gitq--complete-where-values "date" "within")
                  gitq--complete-date-within-examples)))
 
 (ert-deftest gitq-test--complete-where-values/freeform-fields-return-nil ()
   "Fields with no git-derivable value domain stay free-text."
-  (should (null (gitq--complete-where-values ".message" "contains")))
-  (should (null (gitq--complete-where-values ".parents-count" ">")))
-  (should (null (gitq--complete-where-values ".modified" "is")))
-  (should (null (gitq--complete-where-values ".staged" "is")))
-  (should (null (gitq--complete-where-values ".untracked" "is"))))
+  (should (null (gitq--complete-where-values "message" "contains")))
+  (should (null (gitq--complete-where-values "parents-count" ">")))
+  (should (null (gitq--complete-where-values "modified" "is")))
+  (should (null (gitq--complete-where-values "staged" "is")))
+  (should (null (gitq--complete-where-values "untracked" "is"))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--complete-candidates — where-value completion
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--complete-candidates/email-uses-email-not-name ()
-  "`.email' must complete against addresses, not author display names."
+  "`email' must complete against addresses, not author display names."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (let ((cands (gitq--complete-candidates "commits where .email == ")))
+    (let ((cands (gitq--complete-candidates "commits where email == ")))
       (should (member "test@example.com" cands))
       (should-not (member "Test User" cands)))))
 
@@ -1109,31 +1122,31 @@ preview is nil."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (member "Test User" (gitq--complete-candidates "commits where .author == ")))))
+    (should (member "Test User" (gitq--complete-candidates "commits where author == ")))))
 
 (ert-deftest gitq-test--complete-candidates/date-returns-real-dates ()
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (let ((cands (gitq--complete-candidates "commits where .date == ")))
+    (let ((cands (gitq--complete-candidates "commits where date == ")))
       (should (= (length cands) 1))
       (should (string-match-p "^[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}" (car cands))))))
 
 (ert-deftest gitq-test--complete-candidates/date-after-also-gets-real-dates ()
-  "Every where-operator on `.date' (not just `==') gets the same date list."
+  "Every where-operator on `date' (not just `==') gets the same date list."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (gitq--complete-candidates "commits where .date after "))))
+    (should (gitq--complete-candidates "commits where date after "))))
 
 (ert-deftest gitq-test--complete-candidates/path-same-list-for-eq-and-contains ()
-  "`.path == ' and `.path contains ' must offer the identical candidate set."
+  "`path == ' and `path contains ' must offer the identical candidate set."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "a.txt" "x\n" "add a")
     (gitq-test--commit "b.txt" "y\n" "add b")
-    (let ((eq-cands       (gitq--complete-candidates "commits where .path == "))
-          (contains-cands (gitq--complete-candidates "commits where .path contains ")))
+    (let ((eq-cands       (gitq--complete-candidates "commits where path == "))
+          (contains-cands (gitq--complete-candidates "commits where path contains ")))
       (should (member "a.txt" eq-cands))
       (should (member "b.txt" eq-cands))
       (should (equal eq-cands contains-cands)))))
@@ -1143,8 +1156,8 @@ preview is nil."
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
     (call-process "git" nil nil nil "tag" "v1.0")
-    (let ((name-cands   (gitq--complete-candidates "commits where .name == "))
-          (branch-cands (gitq--complete-candidates "commits where .branch == ")))
+    (let ((name-cands   (gitq--complete-candidates "commits where name == "))
+          (branch-cands (gitq--complete-candidates "commits where branch == ")))
       (should (member "main" name-cands))
       (should (member "v1.0" name-cands))
       (should (equal name-cands branch-cands)))))
@@ -1153,7 +1166,7 @@ preview is nil."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (let ((cands (gitq--complete-candidates "commits where .sha == ")))
+    (let ((cands (gitq--complete-candidates "commits where sha == ")))
       (should (= (length cands) 1))
       (should (string-match-p "^[0-9a-f]+$" (car cands))))))
 
@@ -1161,9 +1174,9 @@ preview is nil."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (null (gitq--complete-candidates "commits where .message contains ")))
-    (should (null (gitq--complete-candidates "commits where .modified is ")))
-    (should (null (gitq--complete-candidates "commits where .parents-count > ")))))
+    (should (null (gitq--complete-candidates "commits where message contains ")))
+    (should (null (gitq--complete-candidates "commits where modified is ")))
+    (should (null (gitq--complete-candidates "commits where parents-count > ")))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--complete-candidates — pick/sort/where comma-list correctness
@@ -1171,28 +1184,36 @@ preview is nil."
 
 (ert-deftest gitq-test--complete-candidates/pick-field-never-offers-operators ()
   "pick fields are a plain comma list; they must never suggest ==, contains, etc."
-  (let ((cands (gitq--complete-candidates "commits pick .sha ")))
+  (let ((cands (gitq--complete-candidates "commits pick sha ")))
     (should-not (member "==" cands))
     (should-not (member "contains" cands))
     (should (member "," cands))
     (should (member "where" cands))))
 
 (ert-deftest gitq-test--complete-candidates/pick-comma-continues-with-field-names ()
-  (let ((cands (gitq--complete-candidates "commits pick .sha, ")))
-    (should (member ".author" cands))
+  (let ((cands (gitq--complete-candidates "commits pick sha, ")))
+    (should (member "author" cands))
     (should-not (member "," cands))))
 
 (ert-deftest gitq-test--complete-candidates/sort-field-never-offers-comma ()
   "sort takes exactly one field; unlike where/pick it has no comma-list."
-  (let ((cands (gitq--complete-candidates "commits sort .date ")))
+  (let ((cands (gitq--complete-candidates "commits sort date ")))
     (should-not (member "," cands))
     (should-not (member "==" cands))))
 
 (ert-deftest gitq-test--complete-candidates/where-condition-offers-comma-to-continue ()
   "After a complete where-value, \",\" should be offered to add another condition."
-  (let ((cands (gitq--complete-candidates "commits where .author == \"Alice\" ")))
+  (let ((cands (gitq--complete-candidates "commits where author == \"Alice\" ")))
     (should (member "," cands))
     (should (member "where" cands))))
+
+(ert-deftest gitq-test--complete-candidates/pick-path-field-not-confused-with-step ()
+  "`path' inside `pick' resolves as a field, not as the step keyword ending
+the field list -- the same collision covered at the parser level in
+git-branch-off-gitq-flat-test.el."
+  (let ((cands (gitq--complete-candidates "commits pick path, ")))
+    (should (member "author" cands))
+    (should-not (member "," cands))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--complete-candidates — .diff optional ref, terminals
@@ -1242,20 +1263,20 @@ skip straight to a step or terminal."
 (ert-deftest gitq-test--parse/unquoted-multiword-value-errors ()
   "An unquoted value with spaces leaves leftover tokens and must error
 rather than silently truncate."
-  (should-error (gitq--parse-flat "commits where .date == 2025-12-05 09:30:00 +0400")))
+  (should-error (gitq--parse-flat "commits where date == 2025-12-05 09:30:00 +0400")))
 
 (ert-deftest gitq-test--parse/unquoted-multiword-value-quoted-works ()
   "The correct, quoted form must still parse fine."
-  (let ((nodes (gitq--parse-flat "commits where .date == \"2025-12-05 09:30:00 +0400\"")))
+  (let ((nodes (gitq--parse-flat "commits where date == \"2025-12-05 09:30:00 +0400\"")))
     (should (equal (plist-get (car (plist-get (nth 1 nodes) :conditions)) :value)
                    "2025-12-05 09:30:00 +0400"))))
 
 (ert-deftest gitq-test--parse/where-trailing-garbage-errors ()
-  (should-error (gitq--parse-flat "commits where .author == \"Alice\" extra")))
+  (should-error (gitq--parse-flat "commits where author == \"Alice\" extra")))
 
 (ert-deftest gitq-test--parse/pick-trailing-garbage-errors ()
-  "A pick field list only accepts .field tokens and commas."
-  (should-error (gitq--parse-flat "commits pick .sha not-a-field")))
+  "A pick field list only accepts field tokens and commas."
+  (should-error (gitq--parse-flat "commits pick sha not-a-field")))
 
 (ert-deftest gitq-test--parse/via-trailing-garbage-errors ()
   (should-error (gitq--parse-flat "commits via .parent extra")))
@@ -1281,7 +1302,7 @@ rather than silently truncate."
 (ert-deftest gitq-test--parse/take-skip-sort-path-trailing-garbage-errors ()
   (should-error (gitq--parse-flat "commits take 5 extra"))
   (should-error (gitq--parse-flat "commits skip 5 extra"))
-  (should-error (gitq--parse-flat "commits sort .date extra"))
+  (should-error (gitq--parse-flat "commits sort date extra"))
   (should-error (gitq--parse-flat "commits path \"*.ts\" extra"))
   (should-error (gitq--parse-flat "commits first extra"))
   (should-error (gitq--parse-flat "commits last extra")))
@@ -1315,23 +1336,23 @@ misread as this token's own closing / by the regex-vs-terminal scan."
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--tokenize-flat/unterminated-quote-does-not-error ()
-  (should (equal (gitq--tokenize-flat "where .author == \"Ali")
-                 '("where" ".author" "==" "\"Ali"))))
+  (should (equal (gitq--tokenize-flat "where author == \"Ali")
+                 '("where" "author" "==" "\"Ali"))))
 
 (ert-deftest gitq-test--current-token/unterminated-quote-does-not-error ()
-  (should (equal (gitq--current-token "commits where .date == \"202") "\"202")))
+  (should (equal (gitq--current-token "commits where date == \"202") "\"202")))
 
 (ert-deftest gitq-test--completion-table/unterminated-quote-does-not-error ()
   "Regression test for the exact crash Vertico would hit: re-running
 completion on every keystroke while a quoted value is still open."
-  (should (equal (all-completions "commits where .date == \"202" #'gitq--completion-table)
+  (should (equal (all-completions "commits where date == \"202" #'gitq--completion-table)
                  nil)))
 
 (ert-deftest gitq-test--tokenize-flat/terminated-quote-still-works ()
   "Sanity check: fixing the unterminated case must not break the normal,
 fully-quoted, multi-word value case."
-  (should (equal (gitq--tokenize-flat "where .author == \"Alice Smith\"")
-                 '("where" ".author" "==" "\"Alice Smith\""))))
+  (should (equal (gitq--tokenize-flat "where author == \"Alice Smith\"")
+                 '("where" "author" "==" "\"Alice Smith\""))))
 
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here

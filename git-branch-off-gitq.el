@@ -2,7 +2,7 @@
 
 ;; Provides `gitq': a pipeline query language for navigating git's object graph.
 ;; Syntax: source step step terminal (whitespace-separated, terminals start with /)
-;; Example: (gitq "commits where .author contains \"alice\" take 5 /show")
+;; Example: (gitq "commits where author contains \"alice\" take 5 /show")
 
 (require 'cl-lib)
 
@@ -777,14 +777,16 @@ entirely for a read-only preview (`gitq--preview-frames')."
 ;;               | "branches" | "tags" | "refs" | "worktrees" | "blobs"
 ;;   step     ::= "via" MORPHISM | "where" conditions | "grep" PATTERN
 ;;               | "pickaxe" PATTERN ["regex"] | "path" GLOB
-;;               | "pick" .FIELD[,...] | "take" N | "skip" N
-;;               | "first" | "last" | "sort" ["-"].FIELD
+;;               | "pick" FIELD[,...] | "take" N | "skip" N
+;;               | "first" | "last" | "sort" ["-"]FIELD
 ;;   terminal ::= "/show" | "/copy" | "/insert" | "/count" | "/branch-off" [NAME]
 ;;               | "/amend" ["no-edit"|MSG] | "/squash" [MSG] | "/reword" [MSG]
 ;;               | "/remove" | "/delete" | "/commit" [MSG] | "/stage"
 ;;               | "/mark" [LABEL] | "/worktree"
 ;;   conditions ::= condition ("," condition)*
-;;   condition  ::= "." FIELD [OP value]
+;;   condition  ::= FIELD [OP value]
+;;   FIELD      ::= one of `gitq--field-names' (bare word; unlike MORPHISM,
+;;                  fields do not take a leading ".")
 ;;   value      ::= QUOTED | /REGEX/ | NUMBER | BARE-WORD (not a step keyword)
 ;;
 ;; Disambiguation rules:
@@ -793,17 +795,37 @@ entirely for a read-only preview (`gitq--preview-frames')."
 ;;   2. Step keywords (via where grep pickaxe path pick take skip first last sort)
 ;;      always start a new stage; they are reserved and cannot appear as unquoted
 ;;      values. Use quotes when searching for these literal strings:
-;;        where .message contains "take"   (not: where .message contains take)
+;;        where message contains "take"   (not: where message contains take)
 ;;   3. Former terminal identifiers (commit show count remove stage mark …) are
 ;;      now plain identifiers and can appear freely as where-clause values.
 ;;   4. In "commits in RANGE", range tokens are consumed until a step keyword,
 ;;      /terminal, or end of input. Branch names that are step keywords must be
 ;;      quoted.
+;;   5. FIELD is a closed, validated set (`gitq--field-names'); `path' is both
+;;      a field and a step keyword — see `gitq--field-names' docstring.
 
 (defconst gitq--flat-step-keywords
   '("via" "where" "grep" "pickaxe" "path" "pick" "take" "skip" "first" "last" "sort")
   "Reserved step keywords in flat-syntax pipelines.
 These always start a new stage; quote them when used as string values.")
+
+(defconst gitq--field-names
+  '(;; common, cross-frame-type fields
+    "sha" "author" "email" "date" "message" "path" "name" "branch"
+    "parents-count" "modified" "staged" "untracked"
+    ;; present on specific frame types only (tree/ref/diff/hunk/line),
+    ;; but referenceable via `gitq--frame-field''s generic fallback —
+    ;; included here so `where'/`sort'/`pick' can validate and complete
+    ;; them too, instead of only the "well-known" subset above
+    "tree" "reftype" "detached" "mode" "parent-sha" "commit-sha"
+    "start-line" "end-line" "line-number" "content")
+  "The closed set of field names `where', `sort', and `pick' accept.
+Used both for completion and for grammar validation: any field token
+that is not a member of this list is a parse-time error, not a
+silently-matches-nothing where-condition.  Note: `path' collides with
+the reserved step keyword of the same name (the standalone `path GLOB'
+step) — see `gitq--complete--enclosing-step' and `pick's field-list
+loop, both of which are written to disambiguate this correctly.")
 
 (defun gitq--tokenize-flat (str)
   "Tokenize a flat pipeline STR.
@@ -859,16 +881,20 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
                (member (substring str i (+ i 2)) '("==" "!=" ">=" "<=")))
           (push (substring str i (+ i 2)) tokens) (setq i (+ i 2)))
          ((memq c '(?> ?<)) (push (string c) tokens) (setq i (1+ i)))
-         ((and (eq c ?-) (< (1+ i) len) (eq (aref str (1+ i)) ?.))
+         ;; Negated field name: -date (used in `sort -date'). Fields are
+         ;; bare identifiers now (no leading dot), so this just consumes
+         ;; the leading "-" plus a normal bare-word run.
+         ((and (eq c ?-) (< (1+ i) len)
+               (let ((d (aref str (1+ i))))
+                 (or (and (>= d ?a) (<= d ?z)) (and (>= d ?A) (<= d ?Z)) (eq d ?_))))
           (let ((s i))
-            (setq i (+ i 2))
+            (setq i (1+ i))
             (while (and (< i len)
                         (let ((d (aref str i)))
                           (or (and (>= d ?a) (<= d ?z))
                               (and (>= d ?A) (<= d ?Z))
                               (and (>= d ?0) (<= d ?9))
-                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
-                              (eq d #x2020))))
+                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?})))))
               (setq i (1+ i)))
             (push (substring str s i) tokens)))
          ((eq c ?.)
@@ -922,17 +948,21 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
 (defun gitq--flat-parse-where (tokens)
   "Parse where-conditions from flat TOKENS, returning (node . remaining).
 Step keywords and /terminals act as stage boundaries and are never consumed
-as condition values."
+as condition values.  FIELD tokens must be members of `gitq--field-names' —
+anything else right after `where' or a comma is an error naming the bad
+token, rather than silently ending the clause early or matching nothing
+at run time."
+  (unless (or (null tokens) (member (car tokens) gitq--field-names)
+              (gitq--flat-boundary-p (car tokens)))
+    (error "gitq: expected a field name after 'where', got '%s'" (car tokens)))
   (let (conditions)
-    (while (and tokens (string-prefix-p "." (car tokens)))
-      (let* ((field-tok (pop tokens))
-             (field     (intern (replace-regexp-in-string
-                                 "\\." "-" (substring field-tok 1))))
+    (while (and tokens (member (car tokens) gitq--field-names))
+      (let* ((field     (intern (pop tokens)))
              (next      (car tokens)))
         (cond
-         ;; Bare flag: next token is a boundary, comma, or another .field
+         ;; Bare flag: next token is a boundary, comma, or another field
          ((or (null next) (equal next ",")
-              (string-prefix-p "." next)
+              (member next gitq--field-names)
               (gitq--flat-boundary-p next))
           (push (list :field field :op 'is :value t) conditions))
          ;; Operator present
@@ -947,9 +977,9 @@ as condition values."
               (error
                "gitq: '%s' requires a value; step keyword '%s' must be quoted: \"%s\""
                op-tok next2 next2))
-             ;; No value: nil, comma, dotted field, or /terminal after operator
+             ;; No value: nil, comma, another field, or /terminal after operator
              ((or (null next2) (equal next2 ",")
-                  (string-prefix-p "." next2)
+                  (member next2 gitq--field-names)
                   (gitq--flat-terminal-p next2))
               (push (list :field field :op op :value t) conditions))
              ;; Normal value
@@ -962,7 +992,11 @@ as condition values."
                                 (string-to-number val-tok))
                                (t val-tok))))
                 (push (list :field field :op op :value val) conditions))))))))
-      (when (equal (car tokens) ",") (pop tokens)))
+      (when (equal (car tokens) ",")
+        (pop tokens)
+        (unless (and tokens (member (car tokens) gitq--field-names))
+          (error "gitq: expected a field name after ',' in 'where', got '%s'"
+                 (or (car tokens) "end of input")))))
     (cons (list :type 'where :conditions (nreverse conditions)) tokens)))
 
 (defun gitq--flat-parse-source (tokens)
@@ -1046,13 +1080,18 @@ Returns (node . remaining)."
       ("path"
        (cons (list :type 'path :pattern (gitq--unquote (pop tokens))) tokens))
       ("pick"
+       ;; Driven by field-list membership (plus comma), not the generic
+       ;; step-keyword boundary check: `path' is both a reserved step
+       ;; keyword (the standalone `path GLOB' step) and a legitimate
+       ;; field (blob/diff/hunk/line frames all carry a :path key), so
+       ;; `pick path, author' must recognize `path' as a field here even
+       ;; though it is also a step keyword everywhere else.
        (let (fields)
-         (while (and tokens (not (gitq--flat-boundary-p (car tokens))))
+         (while (and tokens (or (equal (car tokens) ",")
+                                (member (car tokens) gitq--field-names)))
            (let ((tok (pop tokens)))
-             (cond
-              ((equal tok ",") nil)
-              ((string-prefix-p "." tok) (push (intern (substring tok 1)) fields))
-              (t (error "gitq: unexpected token '%s' in 'pick' field list" tok)))))
+             (unless (equal tok ",")
+               (push (intern tok) fields))))
          (cons (list :type 'pick :fields (nreverse fields)) tokens)))
       ("take"
        (cons (list :type 'take :n (string-to-number (pop tokens))) tokens))
@@ -1061,10 +1100,12 @@ Returns (node . remaining)."
       ("first" (cons (list :type 'first) tokens))
       ("last"  (cons (list :type 'last)  tokens))
       ("sort"
-       (let* ((f   (pop tokens))
-              (neg (string-prefix-p "-" f))
-              (fn  (intern (substring (if neg (substring f 1) f) 1))))
-         (cons (list :type 'sort :field fn :desc neg) tokens)))
+       (let* ((f    (pop tokens))
+              (neg  (string-prefix-p "-" f))
+              (name (if neg (substring f 1) f)))
+         (unless (member name gitq--field-names)
+           (error "gitq: unknown field '%s' after 'sort'" name))
+         (cons (list :type 'sort :field (intern name) :desc neg) tokens)))
       (_ (error "gitq: unknown step keyword '%s'" kw)))))
 
 (defun gitq--flat-parse-terminal (tok tokens)
@@ -1116,11 +1157,6 @@ No pipe character required."
     ".diff" ".diff.hunks" ".history" ".commit")
   "Morphism paths offered after `via'.")
 
-(defconst gitq--complete-field-names
-  '(".sha" ".author" ".email" ".date" ".message" ".path" ".name"
-    ".branch" ".parents-count" ".modified" ".staged" ".untracked")
-  "Field names offered after `where', `sort', `pick', and comma separators.")
-
 (defconst gitq--complete-where-operators
   '("==" "!=" ">" "<" ">=" "<=" "contains" "matches" "after" "before" "within" "is")
   "Operators offered after a field name in a where clause.")
@@ -1132,9 +1168,9 @@ No pipe character required."
 
 (defconst gitq--complete-date-within-examples
   '("1 day" "3 days" "1 week" "2 weeks" "1 month" "3 months" "6 months" "1 year")
-  "Example duration values for the `within' where-operator on `.date'.
+  "Example duration values for the `within' where-operator on `date'.
 `within' takes a duration (\"N day/week/month/year(s)\"), not a literal
-date, so it gets its own candidate set instead of `.date's usual list
+date, so it gets its own candidate set instead of `date's usual list
 of real commit dates.")
 
 (defconst gitq--complete-descriptions
@@ -1152,7 +1188,10 @@ of real commit dates.")
     ("where"   . "filter by field conditions")
     ("grep"    . "search blob/commit content for a pattern")
     ("pickaxe" . "filter commits whose diff adds/removes a pattern")
-    ("path"    . "filter by path glob")
+    ;; "path" is both the standalone glob-filter step and the file-path
+    ;; field (blob/diff/hunk/line frames) -- this lookup is a flat string
+    ;; match with no context, so one entry has to cover both meanings.
+    ("path"    . "path glob step, or the file-path field")
     ("pick"    . "project onto specific fields")
     ("take"    . "keep the first N results")
     ("skip"    . "drop the first N results")
@@ -1174,18 +1213,28 @@ of real commit dates.")
     (".history"            . "commits that touched this path")
     (".commit"             . "resolve to the referenced commit")
     ;; field names
-    (".sha"           . "commit SHA")
-    (".author"        . "author name")
-    (".email"         . "author email")
-    (".date"          . "commit date")
-    (".message"       . "commit message")
-    (".path"          . "file path")
-    (".name"          . "ref/branch name")
-    (".branch"        . "worktree's branch")
-    (".parents-count" . "number of parents")
-    (".modified"      . "has modified/unstaged changes")
-    (".staged"        . "has staged changes")
-    (".untracked"     . "has untracked files")
+    ("sha"           . "commit SHA")
+    ("author"        . "author name")
+    ("email"         . "author email")
+    ("date"          . "commit date")
+    ("message"       . "commit message")
+    ("name"          . "ref/branch name")
+    ("branch"        . "worktree's branch")
+    ("parents-count" . "number of parents")
+    ("modified"      . "has modified/unstaged changes")
+    ("staged"        . "has staged changes")
+    ("untracked"     . "has untracked files")
+    ;; field names present on specific frame types only
+    ("tree"        . "commit's tree SHA")
+    ("reftype"     . "ref kind (branch or tag)")
+    ("detached"    . "worktree HEAD is detached")
+    ("mode"        . "tree entry file mode")
+    ("parent-sha"  . "the ref/SHA a diff was compared against")
+    ("commit-sha"  . "commit a hunk/grep line belongs to")
+    ("start-line"  . "hunk's first changed line")
+    ("end-line"    . "hunk's last changed line")
+    ("line-number" . "grep match's line number")
+    ("content"     . "grep match's line content")
     ;; where operators
     ("=="       . "equals")
     ("!="       . "not equals")
@@ -1229,35 +1278,51 @@ CTX is the list of fully-typed tokens so far.  Comma-separated lists
 (`where' conditions, `pick' fields) can put arbitrarily many tokens
 between the stage keyword that opened them and the token currently
 being completed, so callers that need to know \"which stage is this
-token part of\" (e.g. deciding whether a `.field' takes a where-operator
+token part of\" (e.g. deciding whether a field takes a where-operator
 next) should use this instead of just looking at the immediately
-preceding token."
-  (car (last (seq-filter (lambda (tok) (member tok gitq--flat-step-keywords)) ctx))))
+preceding token.
+
+Walks CTX in order rather than just taking the last step-keyword match,
+because `path' is both a step keyword (the standalone `path GLOB' step)
+and a field name (blob/diff/hunk/line frames' path). When `path'
+appears right after `where'/`pick', a comma, or another field name
+(fields may chain without commas too), it is a field reference
+continuing that stage, not a fresh `path' step."
+  (let (enclosing)
+    (dotimes (i (length ctx))
+      (let ((tok (nth i ctx)))
+        (when (and (member tok gitq--flat-step-keywords)
+                   (not (and (member tok gitq--field-names)
+                             (member enclosing '("where" "pick"))
+                             (or (member (nth (1- i) ctx) '("where" "pick" ","))
+                                 (member (nth (1- i) ctx) gitq--field-names)))))
+          (setq enclosing tok))))
+    enclosing))
 
 (defun gitq--complete-where-values (field op)
   "Return completion candidates for a where-condition's value, or nil.
-FIELD is the preceding \".field\" token; OP is the where-operator that
-was just typed.  Returns nil (free text, no candidates) for fields
-with no natural, git-derivable value domain: `.message' (arbitrary,
-often multi-line text), `.parents-count' (an arbitrary integer), and
-the boolean flags `.modified'/`.staged'/`.untracked' (used as bare
-flags — a literal \"true\"/\"false\" string would never actually match,
-since the parser compares values with `equal', so offering either
-would be actively misleading)."
+FIELD is the preceding field token; OP is the where-operator that was
+just typed.  Returns nil (free text, no candidates) for fields with no
+natural, git-derivable value domain: `message' (arbitrary, often
+multi-line text), `parents-count' (an arbitrary integer), and the
+boolean flags `modified'/`staged'/`untracked' (used as bare flags — a
+literal \"true\"/\"false\" string would never actually match, since the
+parser compares values with `equal', so offering either would be
+actively misleading)."
   (cond
-   ((and (equal field ".date") (equal op "within"))
+   ((and (equal field "date") (equal op "within"))
     gitq--complete-date-within-examples)
-   ((equal field ".author")
+   ((equal field "author")
     (ignore-errors (delete-dups (gitq--git "log" "--format=%an" "--all"))))
-   ((equal field ".email")
+   ((equal field "email")
     (ignore-errors (delete-dups (gitq--git "log" "--format=%ae" "--all"))))
-   ((equal field ".date")
+   ((equal field "date")
     (ignore-errors (delete-dups (gitq--git "log" "--format=%ai" "--all"))))
-   ((equal field ".sha")
+   ((member field '("sha" "commit-sha"))
     (ignore-errors (delete-dups (gitq--git "log" "--format=%h" "--all"))))
-   ((equal field ".path")
+   ((equal field "path")
     (ignore-errors (delete-dups (gitq--git "log" "--all" "--name-only" "--format="))))
-   ((member field '(".name" ".branch"))
+   ((member field '("name" "branch"))
     (gitq--complete-refs))))
 
 (defun gitq--complete-candidates (input)
@@ -1298,24 +1363,25 @@ INPUT is everything typed so far; completions extend the last partial word."
 
      ;; After "where" or "," (start of another condition) → field names
      ((or (equal last-ctx "where") (equal last-ctx ","))
-      gitq--complete-field-names)
+      gitq--field-names)
 
-     ;; After a .field that is part of a `where' clause → where
-     ;; operators.  `sort'/`pick' fields, and morphism paths after
-     ;; `via' (which also start with "."), never take one.
-     ((and last-ctx (string-prefix-p "." last-ctx)
+     ;; After a field that is part of a `where' clause → where
+     ;; operators.  `sort'/`pick' fields never take one; `path' is also
+     ;; a field name but is excluded from THIS check anyway, since the
+     ;; enclosing-step guard already requires "where" specifically.
+     ((and last-ctx (member last-ctx gitq--field-names)
            (equal (gitq--complete--enclosing-step ctx) "where"))
       gitq--complete-where-operators)
 
      ;; After "sort" → field names with optional "-" negation prefix
      ((equal last-ctx "sort")
-      (append gitq--complete-field-names
-              (mapcar (lambda (f) (concat "-" f)) gitq--complete-field-names)))
+      (append gitq--field-names
+              (mapcar (lambda (f) (concat "-" f)) gitq--field-names)))
 
      ;; After "pick" or pick-comma → field names
      ((or (equal last-ctx "pick")
           (and (equal last-ctx ",") (member "pick" ctx)))
-      gitq--complete-field-names)
+      gitq--field-names)
 
      ;; After a where-operator → dynamic values (authors, dates, paths,
      ;; refs, sha's, ...) — see `gitq--complete-where-values'.
@@ -1370,7 +1436,7 @@ morphism path, a field name (optionally `sort'-negated with a leading
      ((or (equal key "in") (member key gitq--complete-source-keywords)) "source")
      ((member key gitq--flat-step-keywords)       "step")
      ((member key gitq--complete-morphisms)        "morphism")
-     ((member key gitq--complete-field-names)      "field")
+     ((member key gitq--field-names)      "field")
      ((member key gitq--complete-where-operators)  "operator")
      ((member key gitq--complete-terminals)        "terminal"))))
 
@@ -1523,14 +1589,18 @@ PIPELINE syntax:  source [step...] [/terminal]
 
 Sources:   commits [in RANGE]  HEAD  BRANCH  branches  tags  refs  worktrees  blobs
 Steps:     via MORPHISM  where COND[,COND...]  grep PATTERN  pickaxe PATTERN
-           path GLOB  pick .FIELD[,...]  take N  skip N  first  last  sort [-.] FIELD
+           path GLOB  pick FIELD[,...]  take N  skip N  first  last  sort [-]FIELD
 Terminals: /show  /copy  /insert  /count  /branch-off [NAME]  /amend [no-edit|MSG]
            /squash [MSG]  /reword [MSG]  /remove  /delete  /commit [MSG]
            /stage  /mark [LABEL]
 
+FIELD is a closed, validated set (see `gitq--field-names'); referencing
+an unknown field is a parse-time error. Unlike MORPHISM, FIELD has no
+leading \".\" (e.g. `where author == \"alice\"', not `where .author ...').
+
 Step keywords are reserved: quote them when used as values.
-  CORRECT:  commits where .message contains \"take\" take 5 /show
-  WRONG:    commits where .message contains take take 5 /show  (error)
+  CORRECT:  commits where message contains \"take\" take 5 /show
+  WRONG:    commits where message contains take take 5 /show  (error)
 
 Context-aware candidates for the current token appear as soon as the
 minibuffer opens (via Vertico or any other `completing-read' UI), and
@@ -1541,9 +1611,9 @@ cleanly, without taking focus away from the minibuffer.
 
 Examples:
   (gitq \"commits take 10 /show\")
-  (gitq \"commits where .author contains \\\"alice\\\" take 5 /count\")
-  (gitq \"HEAD via .parent* where .message contains \\\"fix\\\" /show\")
-  (gitq \"commits in main..HEAD sort -.date /show\")"
+  (gitq \"commits where author contains \\\"alice\\\" take 5 /count\")
+  (gitq \"HEAD via .parent* where message contains \\\"fix\\\" /show\")
+  (gitq \"commits in main..HEAD sort -date /show\")"
   (interactive (list (gitq--read-pipeline "gitq> ")))
   (let* ((default-directory (gitq--toplevel))
          (exec     (gitq--exec-nodes (gitq--parse-flat pipeline)))

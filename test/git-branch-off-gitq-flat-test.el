@@ -13,6 +13,12 @@
 ;;   P7. .diff's optional REF arg is not consumed when REF is a step keyword.
 ;;
 ;; Each test names the specific ambiguity case it rules out.
+;;
+;; Field references (where/sort/pick) are bare words (e.g. "author", not
+;; ".author") -- only morphism paths after `via' (.parent, .diff, ...) keep
+;; the leading ".". Fields are validated against a closed list
+;; (gitq--field-names); "type" is not a real field, so tests that need an
+;; arbitrary field placeholder use "message" instead.
 
 (require 'ert)
 (require 'cl-lib)
@@ -113,7 +119,7 @@
 (ert-deftest gitq-flat-test/p2-tokenizer-preserves-regex ()
   "P2: regex literals with spaces or special chars tokenize correctly."
   ;; A regex like /foo bar/ — the tokenizer scans to the closing /
-  (let ((tokens (gitq-flat-test--tok "where .message matches /fix.*/")))
+  (let ((tokens (gitq-flat-test--tok "where message matches /fix.*/")))
     (should (member "/fix.*/" tokens)))
   (let ((tokens (gitq-flat-test--tok "grep /[0-9]+/")))
     (should (equal tokens '("grep" "/[0-9]+/")))))
@@ -143,13 +149,13 @@
     (let* ((dummy (pcase kw
                     ("take"     "1")
                     ("skip"     "0")
-                    ("sort"     ".date")
+                    ("sort"     "date")
                     ("via"      ".parent")
                     ("grep"     "\"x\"")
                     ("pickaxe"  "\"x\"")
                     ("path"     "\"*\"")
-                    ("pick"     ".sha")
-                    ("where"    ".sha")
+                    ("pick"     "sha")
+                    ("where"    "sha")
                     (_          "")))
            (pipeline (string-trim (format "commits %s %s" kw dummy)))
            (nodes    (gitq--parse-flat pipeline)))
@@ -166,8 +172,8 @@
 
 (ert-deftest gitq-flat-test/p3-step-keyword-after-step ()
   "P3: every step keyword after another step starts a new step node."
-  ;; where .sha ... take 5 — take starts a new step after where
-  (let ((nodes (gitq--parse-flat "commits where .modified take 3")))
+  ;; where modified ... take 5 — take starts a new step after where
+  (let ((nodes (gitq--parse-flat "commits where modified take 3")))
     (should (= (length nodes) 3))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'where))
@@ -177,16 +183,16 @@
 (ert-deftest gitq-flat-test/p3-where-value-step-keyword-errors ()
   "P3: unquoted step keyword in where value position is an error."
   (dolist (kw gitq-flat-test--all-step-keywords)
-    ;; where .message contains KEYWORD — KEYWORD is reserved, must error
+    ;; where message contains KEYWORD — KEYWORD is reserved, must error
     (should-error
-     (gitq--parse-flat (format "commits where .message contains %s" kw))
+     (gitq--parse-flat (format "commits where message contains %s" kw))
      :type 'error)))
 
 (ert-deftest gitq-flat-test/p3-where-quoted-step-keyword-is-value ()
   "P3: quoted step keyword in where value position is accepted as a string value."
   (dolist (kw gitq-flat-test--all-step-keywords)
-    ;; where .message contains "KEYWORD" — quoted, so it's a value
-    (let* ((pipeline (format "commits where .message contains \"%s\"" kw))
+    ;; where message contains "KEYWORD" — quoted, so it's a value
+    (let* ((pipeline (format "commits where message contains \"%s\"" kw))
            (nodes    (gitq--parse-flat pipeline))
            (where    (cadr nodes))
            (cond1    (car (plist-get where :conditions))))
@@ -214,27 +220,27 @@
 
 (ert-deftest gitq-flat-test/p4-commit-as-where-value ()
   "P4: 'commit' can appear unquoted as a where-clause value."
-  (let* ((nodes (gitq--parse-flat "commits where .type == commit"))
+  (let* ((nodes (gitq--parse-flat "commits where message == commit"))
          (cond1 (car (plist-get (cadr nodes) :conditions))))
     (should (equal (plist-get cond1 :value) "commit"))))
 
 (ert-deftest gitq-flat-test/p4-all-former-terminals-as-where-values ()
   "P4: every former terminal identifier is accepted unquoted as a where value."
   (dolist (id gitq-flat-test--former-terminals)
-    (let* ((pipeline (format "commits where .type == %s" id))
+    (let* ((pipeline (format "commits where message == %s" id))
            (nodes    (gitq--parse-flat pipeline))
            (cond1    (car (plist-get (cadr nodes) :conditions))))
       (should (equal (plist-get cond1 :value) id)))))
 
 (ert-deftest gitq-flat-test/p4-commit-then-count-unambiguous ()
   "P4: 'commit' as value is distinct from '/commit' terminal and '/count' terminal."
-  ;; where .type == commit → value "commit", no terminal
-  (let* ((nodes (gitq--parse-flat "commits where .type == commit"))
+  ;; where message == commit → value "commit", no terminal
+  (let* ((nodes (gitq--parse-flat "commits where message == commit"))
          (where (cadr nodes)))
     (should (eq (plist-get where :type) 'where))
     (should-not (eq (plist-get where :type) 'terminal)))
-  ;; where .type == commit /count → value "commit", then /count terminal
-  (let* ((nodes (gitq--parse-flat "commits where .type == commit /count"))
+  ;; where message == commit /count → value "commit", then /count terminal
+  (let* ((nodes (gitq--parse-flat "commits where message == commit /count"))
          (term  (car (last nodes))))
     (should (eq (plist-get term :type) 'terminal))
     (should (eq (plist-get term :op) 'count))))
@@ -243,13 +249,13 @@
 ;;; PROPERTY P5: Where bare flags terminate before step keywords
 ;;; ─────────────────────────────────────────────────────────────────────────
 ;;
-;; where .FLAG STEP args — .FLAG is a bare boolean condition; STEP starts next stage.
+;; where FLAG STEP args — FLAG is a bare boolean condition; STEP starts next stage.
 ;; The old |syntax| parser had a bug where STEP would be consumed as the operator.
-;; The flat parser treats step keywords as boundaries so .FLAG is always a bare flag.
+;; The flat parser treats step keywords as boundaries so FLAG is always a bare flag.
 
 (ert-deftest gitq-flat-test/p5-bare-flag-before-take ()
-  "P5: 'where .modified take 5' — .modified is a bare flag, take starts next step."
-  (let* ((nodes (gitq--parse-flat "commits where .modified take 5"))
+  "P5: 'where modified take 5' — modified is a bare flag, take starts next step."
+  (let* ((nodes (gitq--parse-flat "commits where modified take 5"))
          (where (cadr nodes))
          (take  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
@@ -260,13 +266,13 @@
     (should (= (plist-get take :n) 5))))
 
 (ert-deftest gitq-flat-test/p5-bare-flags-all-step-keywords ()
-  "P5: 'where .flag KEYWORD …' correctly identifies bare flag for every step keyword."
+  "P5: 'where flag KEYWORD …' correctly identifies bare flag for every step keyword."
   (dolist (kw (remove "first" (remove "last" gitq-flat-test--all-step-keywords)))
     (let* ((arg (pcase kw
-                  ("take" "1") ("skip" "0") ("sort" ".date")
+                  ("take" "1") ("skip" "0") ("sort" "date")
                   ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
-                  ("path" "\"*\"") ("pick" ".sha") ("where" ".sha") (_ "")))
-           (pipeline (string-trim (format "commits where .modified %s %s" kw arg)))
+                  ("path" "\"*\"") ("pick" "sha") ("where" "sha") (_ "")))
+           (pipeline (string-trim (format "commits where modified %s %s" kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (where    (cadr nodes))
            (cond1    (car (plist-get where :conditions))))
@@ -275,8 +281,8 @@
               ))))
 
 (ert-deftest gitq-flat-test/p5-multi-condition-bare-flag ()
-  "P5: 'where .modified, .staged take 3' — both bare flags, then take."
-  (let* ((nodes  (gitq--parse-flat "commits where .modified, .staged take 3"))
+  "P5: 'where modified, staged take 3' — both bare flags, then take."
+  (let* ((nodes  (gitq--parse-flat "commits where modified, staged take 3"))
          (where  (cadr nodes))
          (conds  (plist-get where :conditions))
          (take   (nth 2 nodes)))
@@ -287,8 +293,8 @@
     (should (= (plist-get take :n) 3))))
 
 (ert-deftest gitq-flat-test/p5-bare-flag-before-terminal ()
-  "P5: 'where .modified /show' — .modified is a bare flag, /show is terminal."
-  (let* ((nodes (gitq--parse-flat "commits where .modified /show"))
+  "P5: 'where modified /show' — modified is a bare flag, /show is terminal."
+  (let* ((nodes (gitq--parse-flat "commits where modified /show"))
          (where (cadr nodes))
          (term  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
@@ -318,9 +324,9 @@
   "P6: 'commits in REF KEYWORD ...' — every step keyword ends the range."
   (dolist (kw (remove "first" (remove "last" gitq-flat-test--all-step-keywords)))
     (let* ((arg (pcase kw
-                  ("take" "1") ("skip" "0") ("sort" ".date")
+                  ("take" "1") ("skip" "0") ("sort" "date")
                   ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
-                  ("path" "\"*\"") ("pick" ".sha") ("where" ".sha") (_ "")))
+                  ("path" "\"*\"") ("pick" "sha") ("where" "sha") (_ "")))
            (pipeline (string-trim (format "commits in main %s %s" kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (src      (car nodes)))
@@ -420,9 +426,9 @@
 
 (ert-deftest gitq-flat-test/cross-former-terminal-in-where-multi-step ()
   "Former terminal as where value, followed by a step keyword."
-  ;; 'commits where .branch == main sort .date /show'
+  ;; 'commits where branch == main sort date /show'
   ;; 'main' is not a keyword; sort starts step; /show is terminal.
-  (let* ((nodes (gitq--parse-flat "commits where .branch == main sort .date /show"))
+  (let* ((nodes (gitq--parse-flat "commits where branch == main sort date /show"))
          (where (cadr nodes))
          (sort  (nth 2 nodes))
          (term  (nth 3 nodes))
@@ -433,7 +439,7 @@
 
 (ert-deftest gitq-flat-test/cross-regex-value-then-terminal ()
   "Regex value in where, then /terminal — not confused."
-  (let* ((nodes (gitq--parse-flat "commits where .message matches /fix.*/ /count"))
+  (let* ((nodes (gitq--parse-flat "commits where message matches /fix.*/ /count"))
          (where (cadr nodes))
          (term  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
@@ -442,19 +448,19 @@
     (should (eq (plist-get term :op) 'count))))
 
 (ert-deftest gitq-flat-test/cross-operator-then-step-keyword-is-error ()
-  "where .field OP STEP_KEYWORD — OP needs a value but gets a reserved word."
+  "where FIELD OP STEP_KEYWORD — OP needs a value but gets a reserved word."
   ;; 'contains take' — 'take' is reserved, should error
   (should-error
-   (gitq--parse-flat "commits where .message contains take /show")
+   (gitq--parse-flat "commits where message contains take /show")
    :type 'error)
   ;; 'contains sort' — 'sort' is reserved, should error
   (should-error
-   (gitq--parse-flat "commits where .message contains sort /show")
+   (gitq--parse-flat "commits where message contains sort /show")
    :type 'error))
 
 (ert-deftest gitq-flat-test/cross-pick-fields-then-terminal ()
-  "pick .field1, .field2 followed by /terminal — fields stop at terminal."
-  (let* ((nodes (gitq--parse-flat "commits pick .sha, .message /show"))
+  "pick field1, field2 followed by /terminal — fields stop at terminal."
+  (let* ((nodes (gitq--parse-flat "commits pick sha, message /show"))
          (pick  (cadr nodes))
          (term  (nth 2 nodes)))
     (should (eq (plist-get pick :type) 'pick))
@@ -462,9 +468,9 @@
     (should (eq (plist-get term :op) 'show))))
 
 (ert-deftest gitq-flat-test/cross-via-parent-then-where-then-take ()
-  "via .parent* where .author contains alice take 5 — three steps, each distinct."
+  "via .parent* where author contains alice take 5 — three steps, each distinct."
   (let* ((nodes (gitq--parse-flat
-                 "commits via .parent* where .author contains alice take 5 /show")))
+                 "commits via .parent* where author contains alice take 5 /show")))
     (should (= (length nodes) 5))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'via))
@@ -523,8 +529,88 @@
   "Every step keyword in an unquoted where value position errors — exhaustive."
   (dolist (kw gitq-flat-test--all-step-keywords)
     (should-error
-     (gitq--parse-flat (format "commits where .message contains %s" kw))
+     (gitq--parse-flat (format "commits where message contains %s" kw))
      :type 'error)))
+
+;;; ─────────────────────────────────────────────────────────────────────────
+;;; Bare field names: closed-list validation and the `path' collision
+;;; ─────────────────────────────────────────────────────────────────────────
+;;
+;; Fields dropped their leading "." (see gitq--field-names): where/sort/pick
+;; now take bare identifiers, validated against a closed list instead of
+;; recognized structurally by a leading dot. `path' is both a reserved step
+;; keyword (the standalone `path GLOB' step) and a legitimate field (blob/
+;; diff/hunk/line frames' path) -- these tests confirm both meanings resolve
+;; correctly depending on context.
+
+(ert-deftest gitq-flat-test/field-unknown-errors-after-where ()
+  (should-error (gitq--parse-flat "commits where notarealfield == \"x\"") :type 'error))
+
+(ert-deftest gitq-flat-test/field-unknown-errors-after-comma ()
+  (should-error
+   (gitq--parse-flat "commits where author == \"a\", notarealfield contains \"b\"")
+   :type 'error))
+
+(ert-deftest gitq-flat-test/field-unknown-errors-after-sort ()
+  (should-error (gitq--parse-flat "commits sort notarealfield") :type 'error))
+
+(ert-deftest gitq-flat-test/field-path-as-where-condition ()
+  "`path' resolves as a field when used in a where condition."
+  (let* ((nodes (gitq--parse-flat "commits where path == \"src/x.ts\""))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :field) 'path))
+    (should (equal (plist-get cond1 :value) "src/x.ts"))))
+
+(ert-deftest gitq-flat-test/field-path-chained-without-comma ()
+  "`path' resolves as a second, comma-less chained field, not a new stage."
+  (let* ((nodes (gitq--parse-flat "commits where modified path == \"src/x.ts\""))
+         (where (cadr nodes))
+         (conds (plist-get where :conditions)))
+    (should (= (length nodes) 2))              ; source, where (no terminal)
+    (should (= (length conds) 2))
+    (should (eq (plist-get (nth 0 conds) :field) 'modified))
+    (should (eq (plist-get (nth 1 conds) :field) 'path))))
+
+(ert-deftest gitq-flat-test/field-path-in-pick-comma-list ()
+  "`path' resolves as a field inside `pick', not as a boundary ending the list."
+  (let* ((nodes (gitq--parse-flat "commits pick path, author"))
+         (pick  (cadr nodes)))
+    (should (= (length nodes) 2))
+    (should (equal (plist-get pick :fields) '(path author)))))
+
+(ert-deftest gitq-flat-test/field-path-in-pick-comma-less ()
+  "`path' resolves as a field inside `pick' even without a comma."
+  (let* ((nodes (gitq--parse-flat "commits pick path author"))
+         (pick  (cadr nodes)))
+    (should (equal (plist-get pick :fields) '(path author)))))
+
+(ert-deftest gitq-flat-test/field-path-still-works-as-standalone-step ()
+  "`path' is still the standalone glob-filter step when it starts a fresh stage."
+  (let* ((nodes (gitq--parse-flat "commits path \"*.ts\"")))
+    (should (eq (plist-get (cadr nodes) :type) 'path))
+    (should (equal (plist-get (cadr nodes) :pattern) "*.ts"))))
+
+(ert-deftest gitq-flat-test/field-path-standalone-step-after-another-step ()
+  "`path' as a standalone step still works right after a prior, unrelated step."
+  (let* ((nodes (gitq--parse-flat "commits take 5 path \"*.ts\"")))
+    (should (eq (plist-get (nth 1 nodes) :type) 'take))
+    (should (eq (plist-get (nth 2 nodes) :type) 'path))))
+
+(ert-deftest gitq-flat-test/field-sort-negation-bare ()
+  "sort -field (bare, no dot) still tokenizes and parses as descending."
+  (should (equal (gitq--tokenize-flat "sort -date") '("sort" "-date")))
+  (let ((nodes (gitq--parse-flat "commits sort -date")))
+    (should (eq (plist-get (cadr nodes) :field) 'date))
+    (should (plist-get (cadr nodes) :desc))))
+
+(ert-deftest gitq-flat-test/field-newly-added-fields-work ()
+  "Fields present only on specific frame types (not the old \"well-known\"
+subset) are still recognized: commit-sha, start-line, end-line via .diff.hunks."
+  (let* ((nodes (gitq--parse-flat
+                 "HEAD via .diff.hunks where commit-sha == \"abc\""))
+         (where (nth 2 nodes))
+         (cond1 (car (plist-get where :conditions))))
+    (should (eq (plist-get cond1 :field) 'commit-sha))))
 
 (provide 'git-branch-off-gitq-flat-test)
 ;;; git-branch-off-gitq-flat-test.el ends here
