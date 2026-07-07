@@ -620,10 +620,9 @@ appear right away, above the minibuffer, without taking focus away
 from typing."
   (display-buffer (gitq--render frames pipeline-str)))
 
-;;;###autoload
 (defun gitq-results-visit ()
   "Visit the git object at point in the *gitq* buffer."
-  (interactive)
+  (interactive nil gitq-results-mode)
   (let* ((frame (get-text-property (point) 'gitq-frame))
          (sha   (get-text-property (point) 'gitq-sha))
          (type  (plist-get frame :type)))
@@ -633,10 +632,9 @@ from typing."
       (_     (when (and sha (fboundp 'magit-show-commit))
                (magit-show-commit sha))))))
 
-;;;###autoload
 (defun gitq-results-branch-off ()
   "Create a branch from the commit at point in the *gitq* buffer."
-  (interactive)
+  (interactive nil gitq-results-mode)
   (let ((sha (get-text-property (point) 'gitq-sha)))
     (unless sha (user-error "No commit at point"))
     (let ((name (read-string "Branch name: ")))
@@ -644,10 +642,9 @@ from typing."
       (when (fboundp 'magit-refresh) (magit-refresh))
       (message "gitq: created branch '%s'" name))))
 
-;;;###autoload
 (defun gitq-results-copy-sha ()
   "Copy the SHA at point to the kill ring."
-  (interactive)
+  (interactive nil gitq-results-mode)
   (let ((sha (get-text-property (point) 'gitq-sha)))
     (if sha
         (progn (kill-new sha)
