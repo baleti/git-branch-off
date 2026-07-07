@@ -1544,6 +1544,35 @@ results)\" for a genuinely nonexistent ref."
                    (not (gitq--fetch-commit (plist-get src-node :ref))))
         (cons :ok (car (gitq--exec-nodes nodes)))))))
 
+(defun gitq--history-search ()
+  "Search `gitq--history' and splice the chosen pipeline into the minibuffer.
+Bound to \\`C-r' while reading a gitq pipeline (see
+`gitq--pipeline-map' and `gitq--read-pipeline').  Opens a *recursive*
+minibuffer whose collection is `gitq--history' itself, so whatever
+`completing-read' front-end is active (Vertico, in particular) shows
+and live-filters the full history list exactly as it would any other
+gitq candidate set — this is the \\`C-r'-in-a-shell equivalent asked
+for, built without a dependency on `consult-history'.
+
+Selecting an entry replaces the outer prompt's current contents with
+it; nothing is executed or previewed until RET is pressed in the outer
+prompt, same as if the text had been typed by hand."
+  (interactive)
+  (unless gitq--history
+    (user-error "No gitq history yet"))
+  (let* ((enable-recursive-minibuffers t)
+         (choice (completing-read "gitq history: " gitq--history nil t)))
+    (delete-minibuffer-contents)
+    (insert choice)))
+
+(defvar gitq--pipeline-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-r") #'gitq--history-search)
+    map)
+  "Keymap merged into the minibuffer's local map by `gitq--read-pipeline'.
+Only active while reading a gitq pipeline, not in `completing-read'
+prompts generally.")
+
 (defun gitq--read-pipeline (prompt)
   "Read a gitq pipeline with `completing-read', driven by Vertico.
 Backed by `gitq--completion-table', so the full candidate set for the
@@ -1557,7 +1586,10 @@ resulting frames are shown read-only in the *gitq* buffer via
 `gitq--preview-display', which does not select that buffer's window —
 focus stays in the minibuffer so typing is uninterrupted.  Pressing RET
 hands the final string back to the caller, which runs the pipeline for
-real, terminal included."
+real, terminal included.
+
+\\`C-r' opens a history search over previously-run pipelines; see
+`gitq--history-search'."
   (let ((mb-buffer  nil)
         (last-input nil)
         (timer      nil))
@@ -1575,6 +1607,7 @@ real, terminal included."
            (setq timer (run-with-timer git-branch-off-gitq-preview-debounce nil #'tick)))
          (setup ()
            (setq mb-buffer (current-buffer))
+           (use-local-map (make-composed-keymap gitq--pipeline-map (current-local-map)))
            (add-hook 'post-command-hook #'schedule nil t)))
       (unwind-protect
           (minibuffer-with-setup-hook #'setup
