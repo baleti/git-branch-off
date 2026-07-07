@@ -57,6 +57,14 @@
                (or (plist-get frame :path) "?")
                (or (plist-get frame :start-line) 0)
                (or (plist-get frame :end-line) 0)))
+      ('diff-line
+       (let ((csha (plist-get frame :commit-sha)))
+         (format "%s%s:%d: %s%s"
+                 (if csha (concat (substring csha 0 (min 8 (length csha))) "  ") "")
+                 (or (plist-get frame :path) "?")
+                 (or (plist-get frame :line-number) 0)
+                 (or (plist-get frame :sign) "?")
+                 (or (plist-get frame :content) ""))))
       (_
        ;; Projected or unknown — print key:value pairs
        (mapconcat (lambda (kv) (format "%s:%s" (car kv) (cdr kv)))

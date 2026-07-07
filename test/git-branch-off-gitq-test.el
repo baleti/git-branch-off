@@ -1603,6 +1603,90 @@ which ref frames have) is still offered."
   (let ((err (should-error (gitq--parse-flat "HEAD via .parent.bogus"))))
     (should (string-match-p "\\.bogus" (error-message-string err)))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: .diff.lines — matched diff content in the pipeline
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--diff-lines/parses-as-single-morphism ()
+  (let* ((nodes (gitq--parse-flat "commits via .diff.lines"))
+         (vias  (seq-filter (lambda (n) (eq (plist-get n :type) 'via)) nodes)))
+    (should (= (length vias) 1))
+    (should (eq (plist-get (car vias) :morphism) 'diff-lines))))
+
+(ert-deftest gitq-test--diff-lines/where-content-typechecks ()
+  "diff-line frames carry `content'/`sign', so filtering on them parses."
+  (should (gitq--parse-flat
+           "commits via .diff.lines where content contains \"x\""))
+  (should (gitq--parse-flat
+           "commits via .diff.lines where sign == \"+\" pick path, content")))
+
+(ert-deftest gitq-test--diff-lines/grep-cannot-follow ()
+  "diff-line frames have no `sha', so `grep' after `.diff.lines' is a
+parse-time domain error."
+  (should-error (gitq--parse-flat "commits via .diff.lines grep \"x\"")))
+
+(ert-deftest gitq-test--diff-lines/parse-diff-text ()
+  "The diff parser assigns signs, paths, line numbers, and content."
+  (let* ((diff (concat "diff --git a/f.txt b/f.txt\n"
+                       "index 000..111 100644\n"
+                       "--- a/f.txt\n"
+                       "+++ b/f.txt\n"
+                       "@@ -1,2 +1,2 @@\n"
+                       " context\n"
+                       "-old line\n"
+                       "+new line\n"))
+         (frames (gitq--parse-diff-lines diff "cafebabe")))
+    (should (= (length frames) 2))
+    (let ((removed (nth 0 frames))
+          (added   (nth 1 frames)))
+      (should (equal (plist-get removed :sign) "-"))
+      (should (equal (plist-get removed :content) "old line"))
+      (should (= (plist-get removed :line-number) 2))
+      (should (equal (plist-get added :sign) "+"))
+      (should (equal (plist-get added :content) "new line"))
+      (should (= (plist-get added :line-number) 2))
+      (should (equal (plist-get added :path) "f.txt"))
+      (should (equal (plist-get added :commit-sha) "cafebabe")))))
+
+(ert-deftest gitq-test--diff-lines/pickaxe-then-matched-content ()
+  "End-to-end: pickaxe narrows to the commits whose diffs touched a
+pattern, .diff.lines exposes the actual +/- lines, and a content filter
+leaves exactly the matched diff lines — including the root commit
+(which diffs against the empty tree)."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "a.txt" "alpha\n" "first")
+    (gitq-test--commit "a.txt" "alpha\nneedle here\n" "add needle")
+    (gitq-test--commit "a.txt" "alpha\n" "drop needle")
+    (gitq-test--commit "b.txt" "unrelated\n" "unrelated")
+    (let* ((exec (gitq--exec-nodes
+                  (gitq--parse-flat
+                   "commits pickaxe \"needle\" via .diff.lines where content contains \"needle\"")))
+           (frames (car exec)))
+      ;; Two commits touched "needle": one added it, one removed it.
+      (should (= (length frames) 2))
+      (should (equal (sort (mapcar (lambda (f) (plist-get f :sign)) frames)
+                           #'string<)
+                     '("+" "-")))
+      (dolist (f frames)
+        (should (eq (plist-get f :type) 'diff-line))
+        (should (equal (plist-get f :path) "a.txt"))
+        (should (equal (plist-get f :content) "needle here"))
+        ;; RET in the results buffer visits via :commit-sha
+        (should (gitq--frame-commit-sha f))))))
+
+(ert-deftest gitq-test--diff-lines/root-commit-uses-empty-tree ()
+  "A root commit's .diff.lines are its whole content as additions."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "a.txt" "one\ntwo\n" "root")
+    (let* ((exec (gitq--exec-nodes (gitq--parse-flat "commits via .diff.lines")))
+           (frames (car exec)))
+      (should (= (length frames) 2))
+      (should (cl-every (lambda (f) (equal (plist-get f :sign) "+")) frames))
+      (should (equal (mapcar (lambda (f) (plist-get f :content)) frames)
+                     '("one" "two"))))))
+
 (ert-deftest gitq-test--registry/every-completion-morphism-parses-and-is-registered ()
   "Every morphism completion candidate parses, and every morphism symbol
 it produces has a full entry (:requires :yields :exec) in `gitq--morphisms'."

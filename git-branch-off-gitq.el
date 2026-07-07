@@ -394,6 +394,28 @@ morphisms exist."
                      (gitq--parse-diff-hunks text sha)))
                  frames)))
 
+(defun gitq--via-diff-lines (frames _node)
+  "Diff-lines morphism: the actual added/removed lines vs. parent.
+Unlike `.diff.hunks' (line ranges only), each frame carries the line's
+text in :content and \"+\"/\"-\" in :sign, so pipelines can filter and
+DISPLAY the matched diff content itself — e.g. after `pickaxe':
+  commits pickaxe \"foo\" via .diff.lines where content contains \"foo\"
+Root commits (no parents) diff against the empty tree via `--root',
+same as `.diff'."
+  (apply #'append
+         (mapcar (lambda (f)
+                   (let* ((sha  (plist-get f :sha))
+                          (root (and (eq (plist-get f :type) 'commit)
+                                     (null (plist-get f :parents))))
+                          (args (if root
+                                    (list "diff-tree" "--root" "-p"
+                                          "--no-commit-id" "-r" sha)
+                                  (list "diff-tree" "-p" "--no-commit-id"
+                                        "-r" (format "%s^" sha) sha)))
+                          (text (string-join (apply #'gitq--git args) "\n")))
+                     (gitq--parse-diff-lines text sha)))
+                 frames)))
+
 (defun gitq--via-history (frames _node)
   "History morphism: the commits that touched each frame's path."
   (apply #'append
@@ -434,6 +456,40 @@ morphisms exist."
                       :commit-sha commit-sha)
                 hunks)))))
     (nreverse hunks)))
+
+(defun gitq--parse-diff-lines (diff-text commit-sha)
+  "Parse DIFF-TEXT into added/removed diff-line frames for COMMIT-SHA.
+:line-number is the new-file line for additions (+) and the old-file
+line for deletions (-).  The +++/--- file headers can't be mistaken for
+added/removed lines because they appear before any @@ hunk header, when
+the line cursors are still nil.  Note `gitq--git' drops empty lines,
+but a diff's empty context line is \" \" (one space), never truly
+empty, so the cursors stay in sync."
+  (let (lines cur-path old-n new-n)
+    (dolist (line (split-string diff-text "\n"))
+      (cond
+       ((string-match "^diff --git a/.+ b/\\(.+\\)$" line)
+        (setq cur-path (match-string 1 line) old-n nil new-n nil))
+       ((and cur-path
+             (string-match "^@@ -\\([0-9]+\\)\\(?:,[0-9]+\\)? \\+\\([0-9]+\\)" line))
+        (setq old-n (string-to-number (match-string 1 line))
+              new-n (string-to-number (match-string 2 line))))
+       ((and old-n (string-prefix-p "+" line))
+        (push (list :type 'diff-line :path cur-path :sign "+"
+                    :line-number new-n :content (substring line 1)
+                    :commit-sha commit-sha)
+              lines)
+        (setq new-n (1+ new-n)))
+       ((and old-n (string-prefix-p "-" line))
+        (push (list :type 'diff-line :path cur-path :sign "-"
+                    :line-number old-n :content (substring line 1)
+                    :commit-sha commit-sha)
+              lines)
+        (setq old-n (1+ old-n)))
+       ;; context line (but not the "\\ No newline at end of file" marker)
+       ((and old-n (not (string-prefix-p "\\" line)))
+        (setq old-n (1+ old-n) new-n (1+ new-n)))))
+    (nreverse lines)))
 
 (defun gitq--exec-where (frames node)
   "Filter FRAMES by the conditions in NODE."
@@ -678,6 +734,20 @@ minibuffer with the query that built that buffer.")
        (insert (format " lines %d-%d"
                        (or (plist-get frame :start-line) 0)
                        (or (plist-get frame :end-line) 0))))
+      ('diff-line
+       (let* ((sign  (or (plist-get frame :sign) "?"))
+              (added (equal sign "+")))
+         (when-let ((csha (plist-get frame :commit-sha)))
+           (insert (propertize (substring csha 0 (min 8 (length csha)))
+                               'face 'magit-hash))
+           (insert "  "))
+         (insert (propertize (or (plist-get frame :path) "?") 'face 'magit-filename))
+         (insert ":")
+         (insert (propertize (number-to-string (or (plist-get frame :line-number) 0))
+                             'face 'shadow))
+         (insert ": ")
+         (insert (propertize (concat sign (or (plist-get frame :content) ""))
+                             'face (if added 'diff-added 'diff-removed)))))
       (_
        ;; projected or unknown — dump key:value pairs
        (let (first)
@@ -952,7 +1022,7 @@ These always start a new stage; quote them when used as string values.")
     ;; included here so `where'/`sort'/`pick' can validate and complete
     ;; them too, instead of only the "well-known" subset above
     "tree" "reftype" "detached" "mode" "parent-sha" "commit-sha"
-    "start-line" "end-line" "line-number" "content")
+    "start-line" "end-line" "line-number" "content" "sign")
   "The closed set of field names `where', `sort', and `pick' accept.
 Used for completion (every field that could ever be valid *somewhere*)
 and for lexical disambiguation.  Grammar validation of any *particular*
@@ -973,7 +1043,7 @@ which are written to disambiguate this correctly.")
     ("untracked" . flag) ("tree" . sha) ("reftype" . string)
     ("detached" . flag) ("mode" . string) ("parent-sha" . sha)
     ("commit-sha" . sha) ("start-line" . number) ("end-line" . number)
-    ("line-number" . number) ("content" . string))
+    ("line-number" . number) ("content" . string) ("sign" . string))
   "Scalar type of each field in `gitq--field-names'.
 The structural field-SET typing below answers \"does this frame carry
 this field at all?\"; this table answers the next question, \"which
@@ -1071,6 +1141,13 @@ reached via `blobs' as a source, or `.tree.blobs'/`.tree.subtrees'/
   '("sha" "path" "line-number" "content" "commit-sha")
   "Fields on a line frame (`grep' output).")
 
+(defconst gitq--diff-line-fields
+  '("path" "line-number" "content" "sign" "commit-sha")
+  "Fields on a diff-line frame (`.diff.lines'): one added or removed
+line of a commit's diff, with the actual line text in `content' and
+\"+\" or \"-\" in `sign'.  Like hunk frames, no `sha' of its own —
+`grep'/`pickaxe' (which need one) cannot follow this morphism.")
+
 (defconst gitq--source-fields
   `((commits  . ,gitq--commit-fields)
     (ref      . ,gitq--commit-fields) ; HEAD or a bare branch/tag/sha source resolves to one commit
@@ -1094,6 +1171,8 @@ reached via `blobs' as a source, or `.tree.blobs'/`.tree.subtrees'/
                     :exec gitq--via-diff)
     (diff-hunks     :requires "sha"           :yields ,gitq--hunk-fields
                     :exec gitq--via-diff-hunks)
+    (diff-lines     :requires "sha"           :yields ,gitq--diff-line-fields
+                    :exec gitq--via-diff-lines)
     (history        :requires "path"          :yields ,gitq--commit-fields
                     :exec gitq--via-history)
     (commit         :requires "commit-sha"    :yields ,gitq--commit-fields
@@ -1136,6 +1215,7 @@ the same shape of thing as its input.")
     ("\\.entries\\[Tree\\]"   . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'tree)))
     ("\\.entries"             . (lambda (_) (list :type 'via :morphism 'tree-entries :filter nil)))
     ("\\.diff\\.hunks"        . (lambda (_) (list :type 'via :morphism 'diff-hunks)))
+    ("\\.diff\\.lines"        . (lambda (_) (list :type 'via :morphism 'diff-lines)))
     ("\\.diff"                . (lambda (_) (list :type 'via :morphism 'diff :ref nil)))
     ("\\.history"             . (lambda (_) (list :type 'via :morphism 'history)))
     ("\\.commit"              . (lambda (_) (list :type 'via :morphism 'commit))))
@@ -1598,7 +1678,8 @@ No pipe character required."
 (defconst gitq--complete-morphisms
   '(".parent" ".parent*" ".parent+" ".parent†" ".tree" ".tree.blobs"
     ".tree.subtrees" ".tree.entries" ".tree.entries[Blob]"
-    ".tree.entries[Tree]" ".diff" ".diff.hunks" ".history" ".commit")
+    ".tree.entries[Tree]" ".diff" ".diff.hunks" ".diff.lines"
+    ".history" ".commit")
   "Morphism paths offered after `via'.
 These are the canonical single-morphism forms; dotted compositions
 (`.parent.tree', `.parent[0].diff', ...) are typed by hand and parsed
@@ -1661,6 +1742,7 @@ of real commit dates.")
     (".tree.entries[Tree]" . "subtree entries only")
     (".diff"               . "paths changed vs. parent (or REF)")
     (".diff.hunks"         . "line ranges changed vs. parent")
+    (".diff.lines"         . "actual +/- diff lines vs. parent, with content")
     (".history"            . "commits that touched this path")
     (".commit"             . "resolve to the referenced commit")
     ;; field names
@@ -1684,8 +1766,9 @@ of real commit dates.")
     ("commit-sha"  . "commit a hunk/grep line belongs to")
     ("start-line"  . "hunk's first changed line")
     ("end-line"    . "hunk's last changed line")
-    ("line-number" . "grep match's line number")
-    ("content"     . "grep match's line content")
+    ("line-number" . "grep/diff-line match's line number")
+    ("content"     . "grep/diff-line match's line content")
+    ("sign"        . "\"+\" (added) or \"-\" (removed) diff line")
     ;; where operators
     ("=="       . "equals")
     ("!="       . "not equals")
