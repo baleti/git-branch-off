@@ -1,8 +1,8 @@
 ;;; git-branch-off-gitq.el --- GitQ: categorical query language for git  -*- lexical-binding: t; -*-
 
 ;; Provides `gitq': a pipeline query language for navigating git's object graph.
-;; Syntax: source | step | step | terminal
-;; Example: (gitq "commits | where .author contains \"alice\" | take 5 | show")
+;; Syntax: source step step terminal (whitespace-separated, terminals start with /)
+;; Example: (gitq "commits where .author contains \"alice\" take 5 /show")
 
 (require 'cl-lib)
 
@@ -32,112 +32,6 @@
           (when s (file-name-as-directory s))))
       (user-error "gitq: not in a git repository")))
 
-;;; Tokenizer
-
-(defun gitq--split-pipeline (str)
-  "Split STR on | separators not inside quoted strings or /regex/ literals."
-  (let (stages (cur "") (i 0) (len (length str)))
-    (while (< i len)
-      (let ((c (aref str i)))
-        (cond
-         ((eq c ?\")
-          (let ((s i))
-            (setq i (1+ i))
-            (while (and (< i len) (not (eq (aref str i) ?\")))
-              (when (eq (aref str i) ?\\) (setq i (1+ i)))
-              (setq i (1+ i)))
-            ;; Only consume the closing quote if one was actually found --
-            ;; an unterminated quote (e.g. still being typed) must not
-            ;; push `i' past the end of `str', or `substring' below signals
-            ;; args-out-of-range instead of just taking the rest as-is.
-            (when (< i len) (setq i (1+ i)))
-            (setq cur (concat cur (substring str s i)))))
-         ((eq c ?/)
-          (let ((s i))
-            (setq i (1+ i))
-            (while (and (< i len) (not (eq (aref str i) ?/)))
-              (setq i (1+ i)))
-            (when (< i len) (setq i (1+ i)))
-            (setq cur (concat cur (substring str s i)))))
-         ((eq c ?|)
-          (push (string-trim cur) stages)
-          (setq cur "" i (1+ i)))
-         (t (setq cur (concat cur (string c)) i (1+ i))))))
-    (push (string-trim cur) stages)
-    (nreverse (seq-remove #'string-empty-p stages))))
-
-(defun gitq--tokenize (stage)
-  "Tokenize a single pipeline STAGE string into a list of token strings."
-  (let (tokens (i 0) (len (length stage)))
-    (while (< i len)
-      (let ((c (aref stage i)))
-        (cond
-         ((memq c '(?\s ?\t ?\n ?\r)) (setq i (1+ i)))
-         ((eq c ?\")
-          (let ((s i))
-            (setq i (1+ i))
-            (while (and (< i len) (not (eq (aref stage i) ?\")))
-              (when (eq (aref stage i) ?\\) (setq i (1+ i)))
-              (setq i (1+ i)))
-            ;; See the matching comment in `gitq--split-pipeline': don't
-            ;; consume a closing quote that was never found.
-            (when (< i len) (setq i (1+ i)))
-            (push (substring stage s i) tokens)))
-         ((eq c ?/)
-          (let ((s i))
-            (setq i (1+ i))
-            (while (and (< i len) (not (eq (aref stage i) ?/)))
-              (setq i (1+ i)))
-            (when (< i len) (setq i (1+ i)))
-            (push (substring stage s i) tokens)))
-         ((eq c ?,) (push "," tokens) (setq i (1+ i)))
-         ((and (< (1+ i) len)
-               (member (substring stage i (+ i 2)) '("==" "!=" ">=" "<=")))
-          (push (substring stage i (+ i 2)) tokens) (setq i (+ i 2)))
-         ((memq c '(?> ?<)) (push (string c) tokens) (setq i (1+ i)))
-         ;; Negated dotted path: -.field (used in `sort -.date')
-         ((and (eq c ?-) (< (1+ i) len) (eq (aref stage (1+ i)) ?.))
-          (let ((s i))
-            (setq i (+ i 2))            ; skip the leading -
-            (while (and (< i len)
-                        (let ((d (aref stage i)))
-                          (or (and (>= d ?a) (<= d ?z))
-                              (and (>= d ?A) (<= d ?Z))
-                              (and (>= d ?0) (<= d ?9))
-                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
-                              (eq d #x2020))))
-              (setq i (1+ i)))
-            (push (substring stage s i) tokens)))
-         ((eq c ?.)
-          (let ((s i))
-            (setq i (1+ i))
-            (while (and (< i len)
-                        (let ((d (aref stage i)))
-                          (or (and (>= d ?a) (<= d ?z))
-                              (and (>= d ?A) (<= d ?Z))
-                              (and (>= d ?0) (<= d ?9))
-                              (memq d '(?. ?- ?_ ?\[ ?\] ?* ?+))
-                              (eq d #x2020))))  ; U+2020 DAGGER †
-              (setq i (1+ i)))
-            (push (substring stage s i) tokens)))
-         ((and (>= c ?0) (<= c ?9))
-          (let ((s i))
-            (while (and (< i len) (>= (aref stage i) ?0) (<= (aref stage i) ?9))
-              (setq i (1+ i)))
-            (push (substring stage s i) tokens)))
-         ((or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z)) (eq c ?_))
-          (let ((s i))
-            (while (and (< i len)
-                        (let ((d (aref stage i)))
-                          (or (and (>= d ?a) (<= d ?z))
-                              (and (>= d ?A) (<= d ?Z))
-                              (and (>= d ?0) (<= d ?9))
-                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?})))))
-              (setq i (1+ i)))
-            (push (substring stage s i) tokens)))
-         (t (setq i (1+ i))))))
-    (nreverse tokens)))
-
 ;;; Parser helpers
 
 (defun gitq--unquote (str)
@@ -156,119 +50,14 @@
 
 (defun gitq--expect-no-more (tokens context)
   "Signal an error if TOKENS is non-nil, naming CONTEXT (e.g. a stage keyword).
-In pipe syntax each stage string is already isolated by splitting on
-`|', so a stage parser should always consume every token it is given.
-Leftover tokens almost always mean either a forgotten `|' before the
-next stage (so that stage's tokens got swallowed as trailing garbage
-here) or a multi-word value that needed double-quotes to be read as one
-token — both used to be silently discarded, which could make a whole
-`where' clause disappear with no error at all and no visible sign
-anything was wrong."
+A terminal always ends the pipeline, so a terminal parser should always
+consume every token it is given. Leftover tokens almost always mean a
+multi-word value that needed double-quotes to be read as one token, or
+a stray extra word after the terminal — both used to be silently
+discarded here."
   (when tokens
-    (error "gitq: unexpected token '%s' after '%s' (missing '|' before the next stage, or quotes around a value?)"
+    (error "gitq: unexpected token '%s' after '%s' (missing quotes around a value?)"
            (car tokens) context)))
-
-(defun gitq--parse-via (tokens)
-  "Parse a `via' stage from TOKENS (the morphism path tokens)."
-  (let ((path (car tokens)))
-    (unless path (error "gitq: missing morphism after 'via'"))
-    (unless (equal path ".diff")
-      (gitq--expect-no-more (cdr tokens) path))
-    (cond
-     ((equal path ".parent")          (list :type 'via :morphism 'parent))
-     ((equal path ".parent*")         (list :type 'via :morphism 'parent :star t))
-     ((equal path ".parent+")         (list :type 'via :morphism 'parent :plus t))
-     ((string-match "^\\.parent\\[\\([0-9]+\\)\\]$" path)
-      (list :type 'via :morphism 'parent :index (string-to-number (match-string 1 path))))
-     ((or (equal path ".parent†") (equal path ".parent†"))
-      (list :type 'via :morphism 'parent-adjoint))
-     ((equal path ".tree")            (list :type 'via :morphism 'tree))
-     ((string-match "^\\.tree\\.entries\\(?:\\[\\(Blob\\|Tree\\)\\]\\)?$" path)
-      (list :type 'via :morphism 'tree-entries
-            :filter (when (match-string 1 path)
-                      (if (equal (match-string 1 path) "Blob") 'blob 'tree))))
-     ((equal path ".tree.blobs")      (list :type 'via :morphism 'tree-entries :filter 'blob))
-     ((equal path ".tree.subtrees")   (list :type 'via :morphism 'tree-entries :filter 'tree))
-     ((equal path ".diff")
-      (let ((ref (when (and (cdr tokens) (not (string-prefix-p "." (cadr tokens))))
-                   (cadr tokens))))
-        (gitq--expect-no-more (if ref (cddr tokens) (cdr tokens)) path)
-        (list :type 'via :morphism 'diff :ref ref)))
-     ((equal path ".diff.hunks")      (list :type 'via :morphism 'diff-hunks))
-     ((equal path ".history")         (list :type 'via :morphism 'history))
-     ((equal path ".commit")          (list :type 'via :morphism 'commit))
-     (t (error "gitq: unknown morphism '%s'" path)))))
-
-(defun gitq--parse-where (tokens)
-  "Parse `where' conditions from TOKENS (list of token strings)."
-  (let (conditions remaining)
-    (setq remaining tokens)
-    (while (and remaining (string-prefix-p "." (car remaining)))
-      (let* ((field-tok (pop remaining))
-             (field-str (substring field-tok 1))
-             ;; .parents.count → parents-count
-             (field (intern (replace-regexp-in-string "\\." "-" field-str))))
-        (cond
-         ;; Bare flag: .modified, .staged, .untracked (no op/value follows)
-         ((or (null remaining) (equal (car remaining) ",")
-              (string-prefix-p "." (car remaining)))
-          (push (list :field field :op 'is :value t) conditions))
-         ;; Operator + value
-         (t
-          (let* ((op-tok (pop remaining))
-                 (op     (intern op-tok)))
-            (if (or (null remaining) (equal (car remaining) ",")
-                    (string-prefix-p "." (car remaining)))
-                (push (list :field field :op op :value t) conditions)
-              (let* ((val-tok (pop remaining))
-                     (val     (cond
-                               ((string-prefix-p "\"" val-tok) (gitq--unquote val-tok))
-                               ((string-prefix-p "/" val-tok)  (gitq--unregex val-tok))
-                               ((string-match-p "^[0-9]+$" val-tok)
-                                (string-to-number val-tok))
-                               (t val-tok))))
-                (push (list :field field :op op :value val) conditions))))))
-        (when (equal (car remaining) ",") (pop remaining))))
-    (gitq--expect-no-more remaining "where")
-    (list :type 'where :conditions (nreverse conditions))))
-
-(defun gitq--parse-pick (tokens)
-  "Parse `pick' field list from TOKENS."
-  (let (fields)
-    (dolist (tok tokens)
-      (cond
-       ((equal tok ",") nil)
-       ((string-prefix-p "." tok) (push (intern (substring tok 1)) fields))
-       (t (error "gitq: unexpected token '%s' in 'pick' field list" tok))))
-    (list :type 'pick :fields (nreverse fields))))
-
-(defun gitq--parse-grep (tokens)
-  "Parse a `grep' stage from TOKENS."
-  (let* ((pat-tok     (car tokens))
-         (rest        (cdr tokens))
-         (is-regex    (string-prefix-p "/" pat-tok))
-         (pattern     (if is-regex (gitq--unregex pat-tok) (gitq--unquote pat-tok)))
-         (has-path    (equal (car rest) "path"))
-         (path-filter (when has-path (gitq--unquote (cadr rest)))))
-    (gitq--expect-no-more (if has-path (cddr rest) rest) "grep")
-    (list :type 'grep :pattern pattern :regex is-regex :path-filter path-filter)))
-
-(defun gitq--parse-pickaxe (tokens)
-  "Parse a `pickaxe' stage from TOKENS."
-  (let* ((pat-tok      (car tokens))
-         (rest         (cdr tokens))
-         (has-regex-kw (equal (car rest) "regex"))
-         (is-regex     (or (string-prefix-p "/" pat-tok) has-regex-kw))
-         (pattern      (if (string-prefix-p "/" pat-tok)
-                           (gitq--unregex pat-tok)
-                         (gitq--unquote pat-tok))))
-    (gitq--expect-no-more (if has-regex-kw (cdr rest) rest) "pickaxe")
-    (list :type 'pickaxe :pattern pattern :regex is-regex)))
-
-(defconst gitq--terminal-keywords
-  '("show" "copy" "insert" "count" "branch-off" "amend" "squash"
-    "reword" "remove" "delete" "commit" "stage" "mark" "worktree")
-  "Keywords that may appear as terminal pipeline operations.")
 
 (defun gitq--parse-terminal (kw tokens)
   "Parse terminal operation KW with remaining TOKENS."
@@ -318,76 +107,6 @@ anything was wrong."
     (gitq--expect-no-more (cdr tokens) kw)
     (list :type 'terminal :op 'mark :label (when tokens (gitq--unquote (car tokens)))))
    (t (error "gitq: unknown terminal operation '%s'" kw))))
-
-(defun gitq--parse-source (tokens)
-  "Parse the first (source) stage from TOKENS."
-  (let ((kw   (car tokens))
-        (rest (cdr tokens)))
-    (cond
-     ((member kw '("commits" "commit"))
-      (if (equal (car rest) "in")
-          (progn
-            (unless (cdr rest) (error "gitq: missing range after 'in'"))
-            ;; Join all remaining tokens to reconstruct "main..feature" etc.
-            (list :type 'source :source 'commits
-                  :range (apply #'concat (cdr rest))))
-        (gitq--expect-no-more rest kw)
-        (list :type 'source :source 'commits :range nil)))
-     ((equal kw "branches")
-      (gitq--expect-no-more rest kw) (list :type 'source :source 'branches))
-     ((equal kw "tags")
-      (gitq--expect-no-more rest kw) (list :type 'source :source 'tags))
-     ((member kw '("worktrees" "worktree"))
-      (gitq--expect-no-more rest kw) (list :type 'source :source 'worktree))
-     ((equal kw "blobs")
-      (gitq--expect-no-more rest kw) (list :type 'source :source 'blobs))
-     ((equal kw "refs")
-      (gitq--expect-no-more rest kw) (list :type 'source :source 'refs))
-     (t
-      (gitq--expect-no-more rest kw)
-      (list :type 'source :source 'ref :ref kw)))))
-
-(defun gitq--parse-stage (stage-str &optional is-source)
-  "Parse a single pipeline stage string into an AST node plist."
-  (let* ((tokens (gitq--tokenize stage-str))
-         (kw     (car tokens))
-         (rest   (cdr tokens)))
-    (if is-source
-        (gitq--parse-source tokens)
-      (cond
-       ((equal kw "via")     (gitq--parse-via rest))
-       ((equal kw "where")   (gitq--parse-where rest))
-       ((equal kw "grep")    (gitq--parse-grep rest))
-       ((equal kw "pickaxe") (gitq--parse-pickaxe rest))
-       ((equal kw "path")
-        (gitq--expect-no-more (cdr rest) kw)
-        (list :type 'path :pattern (gitq--unquote (car rest))))
-       ((equal kw "pick")    (gitq--parse-pick rest))
-       ((equal kw "take")
-        (gitq--expect-no-more (cdr rest) kw)
-        (list :type 'take :n (string-to-number (car rest))))
-       ((equal kw "skip")
-        (gitq--expect-no-more (cdr rest) kw)
-        (list :type 'skip :n (string-to-number (car rest))))
-       ((equal kw "first") (gitq--expect-no-more rest kw) (list :type 'first))
-       ((equal kw "last")  (gitq--expect-no-more rest kw) (list :type 'last))
-       ((equal kw "sort")
-        (gitq--expect-no-more (cdr rest) kw)
-        (let* ((f   (car rest))
-               (neg (string-prefix-p "-" f))
-               (fn  (intern (substring (if neg (substring f 1) f) 1))))
-          (list :type 'sort :field fn :desc neg)))
-       ((member kw gitq--terminal-keywords)
-        (gitq--parse-terminal kw rest))
-       (t (error "gitq: unknown pipeline stage keyword '%s'" kw))))))
-
-(defun gitq--parse (pipeline-str)
-  "Parse a complete gitq pipeline string into a list of AST node plists."
-  (let ((stages (gitq--split-pipeline pipeline-str)))
-    (unless stages (error "gitq: empty pipeline"))
-    (cons (gitq--parse-stage (car stages) t)
-          (mapcar (lambda (s) (gitq--parse-stage s nil))
-                  (cdr stages)))))
 
 ;;; Git data fetchers
 
@@ -1020,7 +739,7 @@ from typing."
 
 ;;; Main entry points
 
-(defvar gitq--history nil "Minibuffer history list for `gitq-interactive'.")
+(defvar gitq--history nil "Minibuffer history list for `gitq'.")
 
 (defun gitq--exec-nodes (nodes)
   "Execute parsed pipeline NODES (a source, zero or more steps, optional terminal).
@@ -1037,43 +756,6 @@ entirely for a read-only preview (`gitq--preview-frames')."
          (frames   (gitq--exec-source src-node))
          (result   (cl-reduce #'gitq--exec-step steps :initial-value frames)))
     (cons result terminal)))
-
-;;;###autoload
-(defun gitq (pipeline)
-  "Execute a GitQ PIPELINE string in the current git repository.
-
-PIPELINE syntax:  source | step ... | terminal
-
-Sources:   commits [in RANGE]  HEAD  BRANCH  branches  tags  refs  worktrees  blobs
-Steps:     via MORPHISM  where COND[, COND...]  grep PATTERN  pickaxe PATTERN
-           path GLOB  pick .FIELD[, ...]  take N  skip N  first  last  sort .FIELD
-Terminals: show  copy  insert  count  branch-off [NAME]  amend [no-edit|MSG]
-           squash [MSG]  reword [MSG]  remove  commit [MSG]
-
-While typing, a read-only preview of the source and steps (ignoring
-any terminal) appears in the *gitq* buffer as soon as they parse and
-execute cleanly, without taking focus away from the minibuffer.
-
-Examples:
-  (gitq \"commits | where .author contains \\\"alice\\\" | take 10 | show\")
-  (gitq \"HEAD | via .parent* | take 3 | squash \\\"consolidated\\\"\")
-  (gitq \"commits | where .message contains \\\"fix\\\" | pick .sha, .date, .message\")"
-  (interactive (list (gitq--read-pipeline "gitq (pipe syntax)> " #'gitq--parse)))
-  (let* ((default-directory (gitq--toplevel))
-         (exec     (gitq--exec-nodes (gitq--parse pipeline)))
-         (result   (car exec))
-         (terminal (cdr exec)))
-    (if terminal
-        (gitq--apply-terminal result terminal pipeline)
-      (gitq--display result pipeline))))
-
-;;;###autoload
-(defun gitq-interactive ()
-  "Prompt for and execute a gitq pipeline with TAB completion."
-  (interactive)
-  (let ((p (gitq--read-pipeline "gitq> ")))
-    (unless (string-empty-p (string-trim p))
-      (gitq-flat p))))
 
 ;;; Flat-syntax pipeline parser (whitespace-separated stages, /terminal keywords)
 ;;
@@ -1126,20 +808,26 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
             (while (and (< i len) (not (eq (aref str i) ?\")))
               (when (eq (aref str i) ?\\) (setq i (1+ i)))
               (setq i (1+ i)))
-            ;; See the matching comment in `gitq--split-pipeline': don't
-            ;; consume a closing quote that was never found -- this runs
-            ;; on every keystroke via live completion, so an in-progress,
-            ;; still-unterminated quote must never error here.
+            ;; Only consume the closing quote if one was actually found --
+            ;; this runs on every keystroke via live completion, so an
+            ;; in-progress, still-unterminated quote must never error here.
             (when (< i len) (setq i (1+ i)))
             (push (substring str s i) tokens)))
          ((eq c ?/)
-          ;; Scan forward to see if there is a matching closing /.
+          ;; Scan forward to see if there is a matching closing /, without
+          ;; crossing into a later quoted string -- otherwise a terminal
+          ;; argument like /branch-off "feature/x" misreads the / inside
+          ;; the branch name as this token's own closing slash, swallowing
+          ;; everything up to it (including the opening quote) as one
+          ;; bogus regex-shaped token.
           ;; Found  → /pattern/ regex literal.
           ;; Absent → /command terminal token.
           (let ((j (1+ i)))
-            (while (and (< j len) (not (eq (aref str j) ?/)))
+            (while (and (< j len)
+                        (not (eq (aref str j) ?/))
+                        (not (eq (aref str j) ?\")))
               (setq j (1+ j)))
-            (if (< j len)
+            (if (and (< j len) (eq (aref str j) ?/))
                 ;; Regex literal: consume up to and including closing /
                 (progn (push (substring str i (1+ j)) tokens)
                        (setq i (1+ j)))
@@ -1349,8 +1037,10 @@ Returns (node . remaining)."
        (let (fields)
          (while (and tokens (not (gitq--flat-boundary-p (car tokens))))
            (let ((tok (pop tokens)))
-             (when (and (not (equal tok ",")) (string-prefix-p "." tok))
-               (push (intern (substring tok 1)) fields))))
+             (cond
+              ((equal tok ",") nil)
+              ((string-prefix-p "." tok) (push (intern (substring tok 1)) fields))
+              (t (error "gitq: unexpected token '%s' in 'pick' field list" tok)))))
          (cons (list :type 'pick :fields (nreverse fields)) tokens)))
       ("take"
        (cons (list :type 'take :n (string-to-number (pop tokens))) tokens))
@@ -1743,13 +1433,13 @@ are annotated via `gitq--affixate'."
   "Seconds of no further input change before gitq (re)previews results."
   :type 'number :group 'git-branch-off)
 
-(defun gitq--preview-frames (input parser)
-  "Return (:ok . FRAMES) if INPUT is a complete pipeline via PARSER, else nil.
-Parses INPUT with PARSER and executes the source and steps (via
-`gitq--exec-nodes'), discarding any terminal — a terminal keyword is
-recognized as ending the pipeline, but its action (branch-off, amend,
-commit, ...) is never applied here, since this only ever previews
-results while the pipeline is still being typed.
+(defun gitq--preview-frames (input)
+  "Return (:ok . FRAMES) if INPUT is a complete pipeline, else nil.
+Parses INPUT with `gitq--parse-flat' and executes the source and steps
+(via `gitq--exec-nodes'), discarding any terminal — a terminal keyword
+is recognized as ending the pipeline, but its action (branch-off,
+amend, commit, ...) is never applied here, since this only ever
+previews results while the pipeline is still being typed.
 
 Returns nil, with no side effects, if INPUT does not currently parse
 or execute cleanly (still mid-token, an unknown keyword, a missing
@@ -1760,39 +1450,37 @@ results\" (FRAMES is an empty list) — both are otherwise nil.
 
 A source token gitq doesn't recognize as a keyword (\"commits\", \"HEAD\",
 ...) parses as a literal ref/branch/commit name instead (see
-`gitq--parse-source' / `gitq--flat-parse-source').  That fallback
-matches genuine ref lookups, but it also matches every partial word on
-the way to typing a real keyword — e.g. \"commi\" parses just fine as
-an (unresolvable) ref while the user is still typing \"commits\".  Left
-alone, that would flash an empty \"(no results)\" preview on each such
-keystroke.  So a `ref' source is only treated as ready once it actually
-resolves; final command execution (`gitq' / `gitq-flat') is untouched
-and still shows \"(no results)\" for a genuinely nonexistent ref."
+`gitq--flat-parse-source').  That fallback matches genuine ref lookups,
+but it also matches every partial word on the way to typing a real
+keyword — e.g. \"commi\" parses just fine as an (unresolvable) ref
+while the user is still typing \"commits\".  Left alone, that would
+flash an empty \"(no results)\" preview on each such keystroke.  So a
+`ref' source is only treated as ready once it actually resolves; final
+command execution (`gitq') is untouched and still shows \"(no
+results)\" for a genuinely nonexistent ref."
   (ignore-errors
     (let* ((default-directory (gitq--toplevel))
-           (nodes    (funcall parser input))
+           (nodes    (gitq--parse-flat input))
            (src-node (car nodes)))
       (unless (and (eq (plist-get src-node :source) 'ref)
                    (not (gitq--fetch-commit (plist-get src-node :ref))))
         (cons :ok (car (gitq--exec-nodes nodes)))))))
 
-(defun gitq--read-pipeline (prompt &optional parser)
+(defun gitq--read-pipeline (prompt)
   "Read a gitq pipeline with `completing-read', driven by Vertico.
 Backed by `gitq--completion-table', so the full candidate set for the
 current pipeline position is shown as soon as the prompt opens, and
 live-updates as each token is completed and the next one begins.
 
 While typing, on a short debounce (`git-branch-off-gitq-preview-debounce'),
-the current input is parsed with PARSER (`gitq--parse-flat' by default;
-pass `gitq--parse' for pipe syntax) via `gitq--preview-frames'.  As soon
-as it parses into a complete pipeline that also executes without error,
-the resulting frames are shown read-only in the *gitq* buffer via
+the current input is parsed via `gitq--preview-frames'.  As soon as it
+parses into a complete pipeline that also executes without error, the
+resulting frames are shown read-only in the *gitq* buffer via
 `gitq--preview-display', which does not select that buffer's window —
 focus stays in the minibuffer so typing is uninterrupted.  Pressing RET
 hands the final string back to the caller, which runs the pipeline for
 real, terminal included."
-  (let ((parser     (or parser #'gitq--parse-flat))
-        (mb-buffer  nil)
+  (let ((mb-buffer  nil)
         (last-input nil)
         (timer      nil))
     (cl-labels
@@ -1802,7 +1490,7 @@ real, terminal included."
                (let ((input (minibuffer-contents-no-properties)))
                  (unless (equal input last-input)
                    (setq last-input input)
-                   (pcase (gitq--preview-frames input parser)
+                   (pcase (gitq--preview-frames input)
                      (`(:ok . ,frames) (gitq--preview-display frames input))))))))
          (schedule ()
            (when timer (cancel-timer timer))
@@ -1816,8 +1504,8 @@ real, terminal included."
         (when timer (cancel-timer timer))))))
 
 ;;;###autoload
-(defun gitq-flat (pipeline)
-  "Execute a GitQ PIPELINE using flat syntax (whitespace-separated, /terminal).
+(defun gitq (pipeline)
+  "Execute a GitQ PIPELINE: a whitespace-separated query over git's object graph.
 
 PIPELINE syntax:  source [step...] [/terminal]
 
@@ -1840,10 +1528,10 @@ appears in the *gitq* buffer as soon as they parse and execute
 cleanly, without taking focus away from the minibuffer.
 
 Examples:
-  (gitq-flat \"commits take 10 /show\")
-  (gitq-flat \"commits where .author contains \\\"alice\\\" take 5 /count\")
-  (gitq-flat \"HEAD via .parent* where .message contains \\\"fix\\\" /show\")
-  (gitq-flat \"commits in main..HEAD sort -.date /show\")"
+  (gitq \"commits take 10 /show\")
+  (gitq \"commits where .author contains \\\"alice\\\" take 5 /count\")
+  (gitq \"HEAD via .parent* where .message contains \\\"fix\\\" /show\")
+  (gitq \"commits in main..HEAD sort -.date /show\")"
   (interactive (list (gitq--read-pipeline "gitq> ")))
   (let* ((default-directory (gitq--toplevel))
          (exec     (gitq--exec-nodes (gitq--parse-flat pipeline)))

@@ -32,83 +32,6 @@
   (call-process "git" nil nil nil "commit" "-q" "-m" message))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--split-pipeline
-;;; ─────────────────────────────────────────────────────────────────────────────
-
-(ert-deftest gitq-test--split/simple ()
-  "Split a simple two-stage pipeline."
-  (should (equal (gitq--split-pipeline "commits | show")
-                 '("commits" "show"))))
-
-(ert-deftest gitq-test--split/three-stages ()
-  "Split a three-stage pipeline."
-  (should (equal (gitq--split-pipeline "commits | where .author == \"alice\" | show")
-                 '("commits" "where .author == \"alice\"" "show"))))
-
-(ert-deftest gitq-test--split/pipe-inside-string ()
-  "Pipe characters inside quoted strings are not treated as separators."
-  (should (equal (gitq--split-pipeline "commits | where .message == \"a|b\" | show")
-                 '("commits" "where .message == \"a|b\"" "show"))))
-
-(ert-deftest gitq-test--split/pipe-inside-regex ()
-  "Pipe characters inside /regex/ literals are not treated as separators."
-  (should (equal (gitq--split-pipeline "commits | where .message matches /foo|bar/ | show")
-                 '("commits" "where .message matches /foo|bar/" "show"))))
-
-(ert-deftest gitq-test--split/whitespace ()
-  "Leading and trailing whitespace is stripped from each stage."
-  (should (equal (gitq--split-pipeline "  commits  |  show  ")
-                 '("commits" "show"))))
-
-(ert-deftest gitq-test--split/single-stage ()
-  "A pipeline with a single stage produces a one-element list."
-  (should (equal (gitq--split-pipeline "commits") '("commits"))))
-
-;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--tokenize
-;;; ─────────────────────────────────────────────────────────────────────────────
-
-(ert-deftest gitq-test--tokenize/keywords ()
-  "Keywords and identifiers are tokenized separately."
-  (should (equal (gitq--tokenize "where .author == \"alice\"")
-                 '("where" ".author" "==" "\"alice\""))))
-
-(ert-deftest gitq-test--tokenize/dotted-path ()
-  "Dotted morphism paths like .tree.entries[Blob] are one token."
-  (should (equal (gitq--tokenize "via .tree.entries[Blob]")
-                 '("via" ".tree.entries[Blob]"))))
-
-(ert-deftest gitq-test--tokenize/kleene-star ()
-  ".parent* is one token."
-  (should (equal (gitq--tokenize "via .parent*")
-                 '("via" ".parent*"))))
-
-(ert-deftest gitq-test--tokenize/quoted-string ()
-  "A quoted string with spaces is a single token."
-  (should (equal (gitq--tokenize "squash \"consolidated commit\"")
-                 '("squash" "\"consolidated commit\""))))
-
-(ert-deftest gitq-test--tokenize/regex-literal ()
-  "A /regex/ literal is a single token."
-  (should (equal (gitq--tokenize "where .message matches /^feat:/")
-                 '("where" ".message" "matches" "/^feat:/"))))
-
-(ert-deftest gitq-test--tokenize/comma ()
-  "Commas are separate tokens."
-  (should (equal (gitq--tokenize "pick .sha, .message, .author")
-                 '("pick" ".sha" "," ".message" "," ".author"))))
-
-(ert-deftest gitq-test--tokenize/operators ()
-  "Two-character operators are single tokens."
-  (should (equal (gitq--tokenize "where .parents.count >= 2")
-                 '("where" ".parents.count" ">=" "2"))))
-
-(ert-deftest gitq-test--tokenize/number ()
-  "Numbers are tokenized as strings."
-  (should (equal (gitq--tokenize "take 10")
-                 '("take" "10"))))
-
-;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--unquote / gitq--unregex
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
@@ -129,138 +52,138 @@
   (should (equal (gitq--unregex "/TODO|FIXME/") "TODO|FIXME")))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — source stages
+;;; Tests: gitq--parse-flat — source stages
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-source/commits ()
-  (let ((node (car (gitq--parse "commits | show"))))
+  (let ((node (car (gitq--parse-flat "commits /show"))))
     (should (eq (plist-get node :type) 'source))
     (should (eq (plist-get node :source) 'commits))
     (should (null (plist-get node :range)))))
 
 (ert-deftest gitq-test--parse-source/commits-in-range ()
-  (let ((node (car (gitq--parse "commits in main..feature | show"))))
+  (let ((node (car (gitq--parse-flat "commits in main..feature /show"))))
     (should (eq (plist-get node :source) 'commits))
     (should (equal (plist-get node :range) "main..feature"))))
 
 (ert-deftest gitq-test--parse-source/head-ref ()
-  (let ((node (car (gitq--parse "HEAD | show"))))
+  (let ((node (car (gitq--parse-flat "HEAD /show"))))
     (should (eq (plist-get node :source) 'ref))
     (should (equal (plist-get node :ref) "HEAD"))))
 
 (ert-deftest gitq-test--parse-source/branch-name ()
-  (let ((node (car (gitq--parse "main | show"))))
+  (let ((node (car (gitq--parse-flat "main /show"))))
     (should (eq (plist-get node :source) 'ref))
     (should (equal (plist-get node :ref) "main"))))
 
 (ert-deftest gitq-test--parse-source/branches ()
-  (let ((node (car (gitq--parse "branches | show"))))
+  (let ((node (car (gitq--parse-flat "branches /show"))))
     (should (eq (plist-get node :source) 'branches))))
 
 (ert-deftest gitq-test--parse-source/tags ()
-  (let ((node (car (gitq--parse "tags | show"))))
+  (let ((node (car (gitq--parse-flat "tags /show"))))
     (should (eq (plist-get node :source) 'tags))))
 
 (ert-deftest gitq-test--parse-source/worktrees ()
-  (let ((node (car (gitq--parse "worktrees | show"))))
+  (let ((node (car (gitq--parse-flat "worktrees /show"))))
     (should (eq (plist-get node :source) 'worktree))))
 
 (ert-deftest gitq-test--parse-source/worktree-singular ()
-  (let ((node (car (gitq--parse "worktree | show"))))
+  (let ((node (car (gitq--parse-flat "worktree /show"))))
     (should (eq (plist-get node :source) 'worktree))))
 
 (ert-deftest gitq-test--parse-source/blobs ()
-  (let ((node (car (gitq--parse "blobs | show"))))
+  (let ((node (car (gitq--parse-flat "blobs /show"))))
     (should (eq (plist-get node :source) 'blobs))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — via step
+;;; Tests: gitq--parse-flat — via step
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-via/parent ()
-  (let* ((nodes (gitq--parse "commits | via .parent | show"))
+  (let* ((nodes (gitq--parse-flat "commits via .parent /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :type) 'via))
     (should (eq (plist-get via :morphism) 'parent))
     (should (null (plist-get via :star)))))
 
 (ert-deftest gitq-test--parse-via/parent-star ()
-  (let* ((nodes (gitq--parse "HEAD | via .parent* | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent* /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'parent))
     (should (plist-get via :star))))
 
 (ert-deftest gitq-test--parse-via/parent-plus ()
-  (let* ((nodes (gitq--parse "HEAD | via .parent+ | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent+ /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'parent))
     (should (plist-get via :plus))))
 
 (ert-deftest gitq-test--parse-via/parent-index ()
-  (let* ((nodes (gitq--parse "HEAD | via .parent[0] | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent[0] /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'parent))
     (should (= (plist-get via :index) 0))))
 
 (ert-deftest gitq-test--parse-via/parent-index-1 ()
-  (let* ((nodes (gitq--parse "HEAD | via .parent[1] | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent[1] /show"))
          (via   (nth 1 nodes)))
     (should (= (plist-get via :index) 1))))
 
 (ert-deftest gitq-test--parse-via/tree ()
-  (let* ((nodes (gitq--parse "HEAD | via .tree | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .tree /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'tree))))
 
 (ert-deftest gitq-test--parse-via/tree-entries-blob ()
-  (let* ((nodes (gitq--parse "HEAD | via .tree.entries[Blob] | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .tree.entries[Blob] /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'tree-entries))
     (should (eq (plist-get via :filter) 'blob))))
 
 (ert-deftest gitq-test--parse-via/tree-entries-tree ()
-  (let* ((nodes (gitq--parse "HEAD | via .tree.entries[Tree] | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .tree.entries[Tree] /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'tree-entries))
     (should (eq (plist-get via :filter) 'tree))))
 
 (ert-deftest gitq-test--parse-via/tree-entries-unfiltered ()
   "Without a type filter, :filter is nil."
-  (let* ((nodes (gitq--parse "HEAD | via .tree.entries | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .tree.entries /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'tree-entries))
     (should (null (plist-get via :filter)))))
 
 (ert-deftest gitq-test--parse-via/diff ()
-  (let* ((nodes (gitq--parse "HEAD | via .diff | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .diff /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'diff))))
 
 (ert-deftest gitq-test--parse-via/diff-hunks ()
-  (let* ((nodes (gitq--parse "HEAD | via .diff.hunks | show"))
+  (let* ((nodes (gitq--parse-flat "HEAD via .diff.hunks /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'diff-hunks))))
 
 (ert-deftest gitq-test--parse-via/history ()
-  (let* ((nodes (gitq--parse "blobs | path \"auth.ts\" | via .history | show"))
+  (let* ((nodes (gitq--parse-flat "blobs path \"auth.ts\" via .history /show"))
          (via   (nth 2 nodes)))
     (should (eq (plist-get via :morphism) 'history))))
 
 (ert-deftest gitq-test--parse-via/commit ()
-  (let* ((nodes (gitq--parse "blobs | via .commit | show"))
+  (let* ((nodes (gitq--parse-flat "blobs via .commit /show"))
          (via   (nth 1 nodes)))
     (should (eq (plist-get via :morphism) 'commit))))
 
 (ert-deftest gitq-test--parse-via/unknown-morphism ()
   "An unknown morphism signals an error at parse time."
-  (should-error (gitq--parse "commits | via .nonExistent | show")))
+  (should-error (gitq--parse-flat "commits via .nonExistent /show")))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — where step
+;;; Tests: gitq--parse-flat — where step
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-where/equality ()
-  (let* ((nodes (gitq--parse "commits | where .author == \"alice\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .author == \"alice\" /show"))
          (where (nth 1 nodes))
          (cond  (car (plist-get where :conditions))))
     (should (eq (plist-get where :type) 'where))
@@ -269,19 +192,19 @@
     (should (equal (plist-get cond :value) "alice"))))
 
 (ert-deftest gitq-test--parse-where/contains ()
-  (let* ((nodes (gitq--parse "commits | where .message contains \"fix\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .message contains \"fix\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'contains))
     (should (equal (plist-get cond :value) "fix"))))
 
 (ert-deftest gitq-test--parse-where/matches-regex ()
-  (let* ((nodes (gitq--parse "commits | where .message matches /^feat:/ | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .message matches /^feat:/ /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'matches))
     (should (equal (plist-get cond :value) "^feat:"))))
 
 (ert-deftest gitq-test--parse-where/numeric-gt ()
-  (let* ((nodes (gitq--parse "commits | where .parents.count > 1 | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .parents.count > 1 /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :field) 'parents-count))
     (should (eq (plist-get cond :op) '>))
@@ -289,7 +212,7 @@
 
 (ert-deftest gitq-test--parse-where/multiple-conditions ()
   "Multiple where conditions separated by commas."
-  (let* ((nodes (gitq--parse "commits | where .author == \"alice\", .message contains \"fix\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .author == \"alice\", .message contains \"fix\" /show"))
          (conds (plist-get (nth 1 nodes) :conditions)))
     (should (= (length conds) 2))
     (should (eq (plist-get (nth 0 conds) :field) 'author))
@@ -297,89 +220,89 @@
 
 (ert-deftest gitq-test--parse-where/bare-flag ()
   "Bare .modified flag (no op/value)."
-  (let* ((nodes (gitq--parse "worktree | where .modified | show"))
+  (let* ((nodes (gitq--parse-flat "worktree where .modified /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :field) 'modified))
     (should (eq (plist-get cond :op)    'is))
     (should (eq (plist-get cond :value) t))))
 
 (ert-deftest gitq-test--parse-where/after ()
-  (let* ((nodes (gitq--parse "commits | where .date after \"2024-01-01\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .date after \"2024-01-01\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'after))
     (should (equal (plist-get cond :value) "2024-01-01"))))
 
 (ert-deftest gitq-test--parse-where/within ()
-  (let* ((nodes (gitq--parse "commits | where .date within \"30 days\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .date within \"30 days\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'within))
     (should (equal (plist-get cond :value) "30 days"))))
 
 (ert-deftest gitq-test--parse-where/sha-equality ()
-  (let* ((nodes (gitq--parse "commits | where .sha == \"a3f9b2\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits where .sha == \"a3f9b2\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (equal (plist-get cond :value) "a3f9b2"))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — pick step
+;;; Tests: gitq--parse-flat — pick step
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-pick/single-field ()
-  (let* ((nodes (gitq--parse "commits | pick .sha | show"))
+  (let* ((nodes (gitq--parse-flat "commits pick .sha /show"))
          (pick  (nth 1 nodes)))
     (should (eq (plist-get pick :type) 'pick))
     (should (equal (plist-get pick :fields) '(sha)))))
 
 (ert-deftest gitq-test--parse-pick/multiple-fields ()
-  (let* ((nodes (gitq--parse "commits | pick .sha, .message, .author | show"))
+  (let* ((nodes (gitq--parse-flat "commits pick .sha, .message, .author /show"))
          (pick  (nth 1 nodes)))
     (should (equal (plist-get pick :fields) '(sha message author)))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — navigation steps
+;;; Tests: gitq--parse-flat — navigation steps
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-take ()
-  (let* ((nodes (gitq--parse "commits | take 10 | show"))
+  (let* ((nodes (gitq--parse-flat "commits take 10 /show"))
          (take  (nth 1 nodes)))
     (should (eq (plist-get take :type) 'take))
     (should (= (plist-get take :n) 10))))
 
 (ert-deftest gitq-test--parse-skip ()
-  (let* ((nodes (gitq--parse "commits | skip 3 | show"))
+  (let* ((nodes (gitq--parse-flat "commits skip 3 /show"))
          (skip  (nth 1 nodes)))
     (should (eq (plist-get skip :type) 'skip))
     (should (= (plist-get skip :n) 3))))
 
 (ert-deftest gitq-test--parse-first ()
-  (let* ((nodes (gitq--parse "commits | first | show"))
+  (let* ((nodes (gitq--parse-flat "commits first /show"))
          (step  (nth 1 nodes)))
     (should (eq (plist-get step :type) 'first))))
 
 (ert-deftest gitq-test--parse-last ()
-  (let* ((nodes (gitq--parse "commits | last | show"))
+  (let* ((nodes (gitq--parse-flat "commits last /show"))
          (step  (nth 1 nodes)))
     (should (eq (plist-get step :type) 'last))))
 
 (ert-deftest gitq-test--parse-sort/ascending ()
-  (let* ((nodes (gitq--parse "commits | sort .date | show"))
+  (let* ((nodes (gitq--parse-flat "commits sort .date /show"))
          (sort  (nth 1 nodes)))
     (should (eq (plist-get sort :type) 'sort))
     (should (eq (plist-get sort :field) 'date))
     (should (null (plist-get sort :desc)))))
 
 (ert-deftest gitq-test--parse-sort/descending ()
-  (let* ((nodes (gitq--parse "commits | sort -.date | show"))
+  (let* ((nodes (gitq--parse-flat "commits sort -.date /show"))
          (sort  (nth 1 nodes)))
     (should (eq (plist-get sort :field) 'date))
     (should (plist-get sort :desc))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — grep / pickaxe / path
+;;; Tests: gitq--parse-flat — grep / pickaxe / path
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-grep/literal ()
-  (let* ((nodes (gitq--parse "commits | grep \"TODO\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits grep \"TODO\" /show"))
          (grep  (nth 1 nodes)))
     (should (eq (plist-get grep :type) 'grep))
     (should (equal (plist-get grep :pattern) "TODO"))
@@ -387,132 +310,138 @@
     (should (null (plist-get grep :path-filter)))))
 
 (ert-deftest gitq-test--parse-grep/regex ()
-  (let* ((nodes (gitq--parse "commits | grep /TODO|FIXME/ | show"))
+  (let* ((nodes (gitq--parse-flat "commits grep /TODO|FIXME/ /show"))
          (grep  (nth 1 nodes)))
     (should (equal (plist-get grep :pattern) "TODO|FIXME"))
     (should (plist-get grep :regex))))
 
 (ert-deftest gitq-test--parse-grep/with-path ()
-  (let* ((nodes (gitq--parse "commits | grep \"TODO\" path \"*.ts\" | show"))
-         (grep  (nth 1 nodes)))
-    (should (equal (plist-get grep :path-filter) "*.ts"))))
+  "Unlike pipe syntax's inline \"grep PATTERN path FILTER\", flat syntax
+composes grep's path filtering as a separate `path' step instead --
+grep itself never sets :path-filter."
+  (let* ((nodes (gitq--parse-flat "commits grep \"TODO\" path \"*.ts\" /show"))
+         (grep  (nth 1 nodes))
+         (path  (nth 2 nodes)))
+    (should (null (plist-get grep :path-filter)))
+    (should (eq (plist-get path :type) 'path))
+    (should (equal (plist-get path :pattern) "*.ts"))))
 
 (ert-deftest gitq-test--parse-pickaxe/literal ()
-  (let* ((nodes  (gitq--parse "commits | pickaxe \"SecretKey\" | show"))
+  (let* ((nodes  (gitq--parse-flat "commits pickaxe \"SecretKey\" /show"))
          (pa     (nth 1 nodes)))
     (should (eq (plist-get pa :type) 'pickaxe))
     (should (equal (plist-get pa :pattern) "SecretKey"))
     (should (null (plist-get pa :regex)))))
 
 (ert-deftest gitq-test--parse-pickaxe/regex ()
-  (let* ((nodes (gitq--parse "commits | pickaxe /password\\s*=/ regex | show"))
+  (let* ((nodes (gitq--parse-flat "commits pickaxe /password\\s*=/ regex /show"))
          (pa    (nth 1 nodes)))
     (should (plist-get pa :regex))))
 
 (ert-deftest gitq-test--parse-path ()
-  (let* ((nodes (gitq--parse "commits | path \"src/auth.ts\" | show"))
+  (let* ((nodes (gitq--parse-flat "commits path \"src/auth.ts\" /show"))
          (path  (nth 1 nodes)))
     (should (eq (plist-get path :type) 'path))
     (should (equal (plist-get path :pattern) "src/auth.ts"))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — terminal operations
+;;; Tests: gitq--parse-flat — terminal operations
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse-terminal/show ()
-  (let* ((nodes (gitq--parse "commits | show"))
+  (let* ((nodes (gitq--parse-flat "commits /show"))
          (term  (nth 1 nodes)))
     (should (eq (plist-get term :type) 'terminal))
     (should (eq (plist-get term :op)   'show))))
 
 (ert-deftest gitq-test--parse-terminal/copy ()
-  (let* ((term (car (last (gitq--parse "commits | copy")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /copy")))))
     (should (eq (plist-get term :op) 'copy))))
 
 (ert-deftest gitq-test--parse-terminal/count ()
-  (let* ((term (car (last (gitq--parse "commits | count")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /count")))))
     (should (eq (plist-get term :op) 'count))))
 
 (ert-deftest gitq-test--parse-terminal/branch-off-bare ()
-  (let* ((term (car (last (gitq--parse "commits | branch-off")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /branch-off")))))
     (should (eq (plist-get term :op) 'branch-off))
     (should (null (plist-get term :name)))))
 
 (ert-deftest gitq-test--parse-terminal/branch-off-named ()
-  (let* ((term (car (last (gitq--parse "commits | branch-off \"feature/x\"")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /branch-off \"feature/x\"")))))
     (should (eq (plist-get term :op) 'branch-off))
     (should (equal (plist-get term :name) "feature/x"))))
 
 (ert-deftest gitq-test--parse-terminal/branch-off-worktree ()
-  (let* ((term (car (last (gitq--parse "commits | branch-off \"feature/x\" worktree \"../wt\"")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /branch-off \"feature/x\" worktree \"../wt\"")))))
     (should (equal (plist-get term :name) "feature/x"))
     (should (equal (plist-get term :worktree) "../wt"))))
 
 (ert-deftest gitq-test--parse-terminal/amend-bare ()
-  (let* ((term (car (last (gitq--parse "HEAD | amend")))))
+  (let* ((term (car (last (gitq--parse-flat "HEAD /amend")))))
     (should (eq (plist-get term :op) 'amend))
     (should (null (plist-get term :no-edit)))
     (should (null (plist-get term :message)))))
 
 (ert-deftest gitq-test--parse-terminal/amend-no-edit ()
-  (let* ((term (car (last (gitq--parse "HEAD | amend no-edit")))))
+  (let* ((term (car (last (gitq--parse-flat "HEAD /amend no-edit")))))
     (should (plist-get term :no-edit))
     (should (null (plist-get term :message)))))
 
 (ert-deftest gitq-test--parse-terminal/amend-message ()
-  (let* ((term (car (last (gitq--parse "HEAD | amend \"new message\"")))))
+  (let* ((term (car (last (gitq--parse-flat "HEAD /amend \"new message\"")))))
     (should (null (plist-get term :no-edit)))
     (should (equal (plist-get term :message) "new message"))))
 
 (ert-deftest gitq-test--parse-terminal/squash-bare ()
-  (let* ((term (car (last (gitq--parse "HEAD | squash")))))
+  (let* ((term (car (last (gitq--parse-flat "HEAD /squash")))))
     (should (eq (plist-get term :op) 'squash))
     (should (null (plist-get term :message)))))
 
 (ert-deftest gitq-test--parse-terminal/squash-message ()
-  (let* ((term (car (last (gitq--parse "HEAD | via .parent* | take 3 | squash \"consolidated\"")))))
+  (let* ((term (car (last (gitq--parse-flat "HEAD via .parent* take 3 /squash \"consolidated\"")))))
     (should (eq (plist-get term :op) 'squash))
     (should (equal (plist-get term :message) "consolidated"))))
 
 (ert-deftest gitq-test--parse-terminal/reword-bare ()
-  (let* ((term (car (last (gitq--parse "commits | reword")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /reword")))))
     (should (eq (plist-get term :op) 'reword))
     (should (null (plist-get term :message)))))
 
 (ert-deftest gitq-test--parse-terminal/reword-message ()
-  (let* ((term (car (last (gitq--parse "commits | reword \"new message\"")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /reword \"new message\"")))))
     (should (equal (plist-get term :message) "new message"))))
 
 (ert-deftest gitq-test--parse-terminal/remove ()
-  (let* ((term (car (last (gitq--parse "commits | remove")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /remove")))))
     (should (eq (plist-get term :op) 'remove))))
 
 (ert-deftest gitq-test--parse-terminal/commit-bare ()
-  (let* ((term (car (last (gitq--parse "worktree | commit")))))
+  (let* ((term (car (last (gitq--parse-flat "worktree /commit")))))
     (should (eq (plist-get term :op) 'commit))
     (should (null (plist-get term :message)))))
 
 (ert-deftest gitq-test--parse-terminal/commit-message ()
-  (let* ((term (car (last (gitq--parse "worktree | commit \"fix: auth\"")))))
+  (let* ((term (car (last (gitq--parse-flat "worktree /commit \"fix: auth\"")))))
     (should (equal (plist-get term :message) "fix: auth"))))
 
 (ert-deftest gitq-test--parse-terminal/mark ()
-  (let* ((term (car (last (gitq--parse "commits | mark \"stable\"")))))
+  (let* ((term (car (last (gitq--parse-flat "commits /mark \"stable\"")))))
     (should (eq (plist-get term :op) 'mark))
     (should (equal (plist-get term :label) "stable"))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: gitq--parse — full pipeline structure
+;;; Tests: gitq--parse-flat — full pipeline structure
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--parse/pipeline-length ()
   "A 4-stage pipeline parses to 4 nodes."
-  (let ((nodes (gitq--parse "commits | where .author == \"alice\" | take 10 | show")))
+  (let ((nodes (gitq--parse-flat "commits where .author == \"alice\" take 10 /show")))
     (should (= (length nodes) 4))))
 
 (ert-deftest gitq-test--parse/pipeline-types ()
   "Node types are source, where, take, terminal in order."
-  (let ((nodes (gitq--parse "commits | where .author == \"alice\" | take 10 | show")))
+  (let ((nodes (gitq--parse-flat "commits where .author == \"alice\" take 10 /show")))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'where))
     (should (eq (plist-get (nth 2 nodes) :type) 'take))
@@ -520,12 +449,12 @@
 
 (ert-deftest gitq-test--parse/empty-pipeline-errors ()
   "An empty string signals an error."
-  (should-error (gitq--parse "")))
+  (should-error (gitq--parse-flat "")))
 
 (ert-deftest gitq-test--parse/complex-pipeline ()
   "Example 3 from spec: commits introducing a string via pickaxe."
-  (let* ((nodes (gitq--parse
-                 "commits | via .diff | pickaxe \"SecretKey\" | pick .sha, .date, .author, .path"))
+  (let* ((nodes (gitq--parse-flat
+                 "commits via .diff pickaxe \"SecretKey\" pick .sha, .date, .author, .path"))
          (src   (nth 0 nodes))
          (via   (nth 1 nodes))
          (pa    (nth 2 nodes))
@@ -939,11 +868,11 @@ index abc..def 100644\n\
     (should (= (plist-get (nth 1 hunks) :start-line) 21))))
 
 (ert-deftest gitq-test--integration/full-query-commits-show ()
-  "Full gitq pipeline: commits | take 1 | show — creates *gitq* buffer."
+  "Full gitq pipeline: commits take 1 /show — creates *gitq* buffer."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (gitq "commits | take 1 | show")
+    (gitq "commits take 1 /show")
     (let ((buf (get-buffer "*gitq*")))
       (should buf)
       (with-current-buffer buf
@@ -951,13 +880,13 @@ index abc..def 100644\n\
         (should (> (buffer-size) 0))))))
 
 (ert-deftest gitq-test--integration/full-query-where-message ()
-  "commits | where .message contains X | show filters correctly."
+  "commits where .message contains X /show filters correctly."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "a.txt" "1\n" "fix: auth issue")
     (gitq-test--commit "b.txt" "2\n" "feat: new widget")
     (gitq-test--commit "c.txt" "3\n" "fix: logging bug")
-    (gitq "commits | where .message contains \"fix\" | show")
+    (gitq "commits where .message contains \"fix\" /show")
     (let ((buf (get-buffer "*gitq*")))
       (with-current-buffer buf
         ;; Should show 2 fix commits, not the feat one
@@ -965,21 +894,21 @@ index abc..def 100644\n\
         (should-not (string-match-p "feat" (buffer-string)))))))
 
 (ert-deftest gitq-test--integration/full-query-branch-off ()
-  "commits | first | branch-off creates the branch."
+  "commits first /branch-off creates the branch."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (gitq "commits | first | branch-off \"test-branch\"")
+    (gitq "commits first /branch-off \"test-branch\"")
     (let ((branches (gitq--git "branch" "--list" "test-branch")))
       (should (>= (length branches) 1)))))
 
 (ert-deftest gitq-test--integration/full-query-head-parent ()
-  "HEAD | via .parent | show navigates to parent commit."
+  "HEAD via .parent /show navigates to parent commit."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "a\n" "the-parent-msg")
     (gitq-test--commit "f.txt" "b\n" "the-head-msg")
-    (gitq "HEAD | via .parent | show")
+    (gitq "HEAD via .parent /show")
     (let ((buf (get-buffer "*gitq*")))
       (with-current-buffer buf
         ;; The results section (after the header) should show the parent message
@@ -1026,7 +955,7 @@ not as a resolved-but-empty ref lookup."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (null (gitq--preview-frames "commi" #'gitq--parse-flat)))))
+    (should (null (gitq--preview-frames "commi")))))
 
 (ert-deftest gitq-test--preview-frames/mid-step-keyword-is-not-ready ()
   "A partial step keyword (\"wh\" toward \"where\") fails to parse, so
@@ -1034,14 +963,14 @@ preview is nil."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (null (gitq--preview-frames "commits wh" #'gitq--parse-flat)))))
+    (should (null (gitq--preview-frames "commits wh")))))
 
 (ert-deftest gitq-test--preview-frames/complete-source-only ()
   "A bare, complete source keyword previews immediately."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (let ((r (gitq--preview-frames "commits" #'gitq--parse-flat)))
+    (let ((r (gitq--preview-frames "commits")))
       (should (eq (car r) :ok))
       (should (= (length (cdr r)) 1)))))
 
@@ -1051,7 +980,7 @@ preview is nil."
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "commit by test user")
     (let ((r (gitq--preview-frames
-              "commits where .author contains \"Test\"" #'gitq--parse-flat)))
+              "commits where .author contains \"Test\"")))
       (should (eq (car r) :ok))
       (should (= (length (cdr r)) 1)))))
 
@@ -1060,7 +989,7 @@ preview is nil."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (let ((r (gitq--preview-frames "main" #'gitq--parse-flat)))
+    (let ((r (gitq--preview-frames "main")))
       (should (eq (car r) :ok))
       (should (= (length (cdr r)) 1)))))
 
@@ -1069,7 +998,7 @@ preview is nil."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (null (gitq--preview-frames "zzzz-does-not-exist" #'gitq--parse-flat)))))
+    (should (null (gitq--preview-frames "zzzz-does-not-exist")))))
 
 (ert-deftest gitq-test--preview-frames/destructive-terminal-not-applied ()
   "Previewing a pipeline whose terminal is destructive must not run it."
@@ -1077,27 +1006,17 @@ preview is nil."
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
     (let ((r (gitq--preview-frames
-              "commits /branch-off \"should-not-exist\"" #'gitq--parse-flat)))
+              "commits /branch-off \"should-not-exist\"")))
       (should (eq (car r) :ok))
       (should (= (length (cdr r)) 1)))
     (should (= (length (gitq--git "branch" "--list" "should-not-exist")) 0))))
-
-(ert-deftest gitq-test--preview-frames/pipe-syntax ()
-  "Preview also works with the pipe-syntax parser."
-  :tags '(integration)
-  (gitq-test--with-repo
-    (gitq-test--commit "f.txt" "x\n" "commit by test user")
-    (let ((r (gitq--preview-frames
-              "commits | where .author contains \"Test\"" #'gitq--parse)))
-      (should (eq (car r) :ok))
-      (should (= (length (cdr r)) 1)))))
 
 (ert-deftest gitq-test--preview-frames/outside-repo-is-not-ready ()
   "Outside a git repository, preview fails silently (nil), not with an error."
   (let* ((dir (make-temp-file "gitq-test-norepo-" t))
          (default-directory dir))
     (unwind-protect
-        (should (null (gitq--preview-frames "commits" #'gitq--parse-flat)))
+        (should (null (gitq--preview-frames "commits")))
       (delete-directory dir t))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
@@ -1308,82 +1227,82 @@ skip straight to a step or terminal."
     (should (member "main" (gitq--complete-candidates "commits in ")))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
-;;; Tests: pipe-syntax strict trailing-token errors
+;;; Tests: strict trailing-token errors
 ;;;
-;;; Every pipe-syntax stage used to silently discard tokens it didn't
-;;; consume. Worst case: "commits where .date == ..." with no "|" before
-;;; "where" parsed the whole where-clause away as unconsumed leftover of
-;;; the "commits" source, executing as a plain, unfiltered "commits" --
-;;; no error, just silently wrong results. These tests assert that this
-;;; whole class of mistake now raises a clear error instead.
+;;; Every step must consume every token it's given -- a leftover token
+;;; (usually a value that needed quotes) must raise a clear error instead
+;;; of silently truncating the query. Root case this covers: an unquoted,
+;;; multi-word value like a full commit date/time tokenizes into several
+;;; separate tokens, since dashes/colons/plus aren't part of the bare-word
+;;; character class -- without this check, only the first token would be
+;;; used as the value and the rest silently dropped, filtering on the
+;;; wrong (truncated) value with no error at all.
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
-(ert-deftest gitq-test--parse/missing-pipe-before-where-errors ()
-  "The exact original bug: forgetting '|' before `where' must error,
-not silently drop the whole where-clause."
-  (should-error (gitq--parse "commits where .date == 2025")))
-
 (ert-deftest gitq-test--parse/unquoted-multiword-value-errors ()
-  "Even with the pipe present, an unquoted value with spaces leaves
-leftover tokens and must error rather than silently truncate."
-  (should-error (gitq--parse "commits | where .date == 2025-12-05 09:30:00 +0400")))
+  "An unquoted value with spaces leaves leftover tokens and must error
+rather than silently truncate."
+  (should-error (gitq--parse-flat "commits where .date == 2025-12-05 09:30:00 +0400")))
 
 (ert-deftest gitq-test--parse/unquoted-multiword-value-quoted-works ()
   "The correct, quoted form must still parse fine."
-  (let ((nodes (gitq--parse "commits | where .date == \"2025-12-05 09:30:00 +0400\"")))
+  (let ((nodes (gitq--parse-flat "commits where .date == \"2025-12-05 09:30:00 +0400\"")))
     (should (equal (plist-get (car (plist-get (nth 1 nodes) :conditions)) :value)
                    "2025-12-05 09:30:00 +0400"))))
 
 (ert-deftest gitq-test--parse/where-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | where .author == \"Alice\" extra")))
+  (should-error (gitq--parse-flat "commits where .author == \"Alice\" extra")))
 
 (ert-deftest gitq-test--parse/pick-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | pick .sha not-a-field")))
+  "A pick field list only accepts .field tokens and commas."
+  (should-error (gitq--parse-flat "commits pick .sha not-a-field")))
 
 (ert-deftest gitq-test--parse/via-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | via .parent extra")))
+  (should-error (gitq--parse-flat "commits via .parent extra")))
 
 (ert-deftest gitq-test--parse/via-diff-still-allows-optional-ref ()
-  (let ((nodes (gitq--parse "commits | via .diff main")))
+  (let ((nodes (gitq--parse-flat "commits via .diff main")))
     (should (equal (plist-get (nth 1 nodes) :ref) "main"))))
 
 (ert-deftest gitq-test--parse/grep-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | grep \"foo\" extra")))
-
-(ert-deftest gitq-test--parse/grep-path-filter-still-works ()
-  (let ((nodes (gitq--parse "commits | grep \"foo\" path \"*.ts\"")))
-    (should (equal (plist-get (nth 1 nodes) :path-filter) "*.ts"))))
+  (should-error (gitq--parse-flat "commits grep \"foo\" extra")))
 
 (ert-deftest gitq-test--parse/pickaxe-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | pickaxe \"foo\" extra")))
+  (should-error (gitq--parse-flat "commits pickaxe \"foo\" extra")))
 
 (ert-deftest gitq-test--parse/pickaxe-regex-flag-still-works ()
-  (let ((nodes (gitq--parse "commits | pickaxe \"foo\" regex")))
+  (let ((nodes (gitq--parse-flat "commits pickaxe \"foo\" regex")))
     (should (plist-get (nth 1 nodes) :regex))))
 
 (ert-deftest gitq-test--parse/source-trailing-garbage-errors ()
-  (should-error (gitq--parse "branches extra"))
-  (should-error (gitq--parse "some-branch-name extra")))
+  (should-error (gitq--parse-flat "branches extra"))
+  (should-error (gitq--parse-flat "some-branch-name extra")))
 
 (ert-deftest gitq-test--parse/take-skip-sort-path-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | take 5 extra"))
-  (should-error (gitq--parse "commits | skip 5 extra"))
-  (should-error (gitq--parse "commits | sort .date extra"))
-  (should-error (gitq--parse "commits | path \"*.ts\" extra"))
-  (should-error (gitq--parse "commits | first extra"))
-  (should-error (gitq--parse "commits | last extra")))
+  (should-error (gitq--parse-flat "commits take 5 extra"))
+  (should-error (gitq--parse-flat "commits skip 5 extra"))
+  (should-error (gitq--parse-flat "commits sort .date extra"))
+  (should-error (gitq--parse-flat "commits path \"*.ts\" extra"))
+  (should-error (gitq--parse-flat "commits first extra"))
+  (should-error (gitq--parse-flat "commits last extra")))
 
 (ert-deftest gitq-test--parse/terminal-trailing-garbage-errors ()
-  (should-error (gitq--parse "commits | show extra"))
-  (should-error (gitq--parse "commits | count extra")))
+  (should-error (gitq--parse-flat "commits /show extra"))
+  (should-error (gitq--parse-flat "commits /count extra")))
 
 (ert-deftest gitq-test--parse/terminal-branch-off-with-worktree-still-works ()
-  (let ((nodes (gitq--parse "commits | branch-off \"name\" worktree \"/tmp/wt\"")))
+  (let ((nodes (gitq--parse-flat "commits /branch-off \"name\" worktree \"/tmp/wt\"")))
     (should (equal (plist-get (car (last nodes)) :name) "name"))
     (should (equal (plist-get (car (last nodes)) :worktree) "/tmp/wt"))))
 
+(ert-deftest gitq-test--parse/terminal-branch-off-name-with-slash ()
+  "A branch name containing a literal / (e.g. \"feature/x\") must not be
+misread as this token's own closing / by the regex-vs-terminal scan."
+  (let ((nodes (gitq--parse-flat "commits /branch-off \"feature/x\"")))
+    (should (equal (plist-get (car (last nodes)) :name) "feature/x"))))
+
 (ert-deftest gitq-test--parse/terminal-amend-no-edit-still-works ()
-  (let ((nodes (gitq--parse "commits | amend no-edit")))
+  (let ((nodes (gitq--parse-flat "commits /amend no-edit")))
     (should (plist-get (car (last nodes)) :no-edit))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
@@ -1398,21 +1317,6 @@ leftover tokens and must error rather than silently truncate."
 (ert-deftest gitq-test--tokenize-flat/unterminated-quote-does-not-error ()
   (should (equal (gitq--tokenize-flat "where .author == \"Ali")
                  '("where" ".author" "==" "\"Ali"))))
-
-(ert-deftest gitq-test--tokenize/unterminated-quote-does-not-error ()
-  (should (equal (gitq--tokenize "where .author == \"Ali")
-                 '("where" ".author" "==" "\"Ali"))))
-
-(ert-deftest gitq-test--tokenize/unterminated-regex-does-not-error ()
-  (should (equal (gitq--tokenize "grep /foo") '("grep" "/foo"))))
-
-(ert-deftest gitq-test--split-pipeline/unterminated-quote-does-not-error ()
-  (should (equal (gitq--split-pipeline "commits | where .author == \"Ali")
-                 '("commits" "where .author == \"Ali"))))
-
-(ert-deftest gitq-test--split-pipeline/unterminated-regex-does-not-error ()
-  (should (equal (gitq--split-pipeline "commits | grep /foo")
-                 '("commits" "grep /foo"))))
 
 (ert-deftest gitq-test--current-token/unterminated-quote-does-not-error ()
   (should (equal (gitq--current-token "commits where .date == \"202") "\"202")))
