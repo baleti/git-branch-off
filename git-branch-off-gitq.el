@@ -9,13 +9,16 @@
 ;;; Git execution layer
 
 (defun gitq--git (&rest args)
-  "Run git with ARGS; return output lines as a list of non-empty strings."
+  "Run git with ARGS; return output lines as a list of non-empty strings.
+Stderr is discarded, not mixed into the captured buffer -- otherwise a
+git error message (e.g. an invalid revision) gets split into lines and
+silently returned as if it were real data."
   (if (fboundp 'magit-git-lines)
       (apply #'magit-git-lines args)
     (let ((buf (generate-new-buffer " *gitq-git*")))
       (unwind-protect
           (progn
-            (apply #'call-process "git" nil buf nil args)
+            (apply #'call-process "git" nil (list buf nil) nil args)
             (with-current-buffer buf
               (split-string (buffer-string) "\n" t)))
         (kill-buffer buf)))))
@@ -307,10 +310,19 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
        (let ((ref (plist-get node :ref)))
          (apply #'append
                 (mapcar (lambda (f)
-                          (let* ((sha   (plist-get f :sha))
-                                 (other (or ref (format "%s^" sha)))
-                                 (paths (gitq--git "diff-tree" "-r" "--name-only"
-                                                   "--no-commit-id" other sha)))
+                          (let* ((sha       (plist-get f :sha))
+                                 ;; A root commit (no parents) has no
+                                 ;; "sha^" to diff against -- `--root'
+                                 ;; diffs it against the empty tree
+                                 ;; instead of erroring on an invalid
+                                 ;; revision.
+                                 (no-parent (and (not ref) (null (plist-get f :parents))))
+                                 (other     (unless no-parent (or ref (format "%s^" sha))))
+                                 (paths     (if no-parent
+                                                (gitq--git "diff-tree" "--root" "-r"
+                                                          "--name-only" "--no-commit-id" sha)
+                                              (gitq--git "diff-tree" "-r" "--name-only"
+                                                        "--no-commit-id" other sha))))
                             (mapcar (lambda (p)
                                       (list :type 'diff :sha sha :path p
                                             :parent-sha other))
@@ -477,12 +489,18 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
                 frames)))
 
 (defun gitq--exec-pick (frames node)
-  "Project each frame in FRAMES to only the fields listed in NODE."
+  "Project each frame in FRAMES to only the fields listed in NODE.
+Projected keys are keywords (`:sha', `:path', ...), matching every other
+frame type -- storing bare symbol keys here would silently break any
+keyword-based lookup on the result (`gitq--frame-field', `plist-get
+frame :sha' in `gitq--frame-commit-sha', the results-buffer RET/b/c
+commands, ...)."
   (let ((fields (plist-get node :fields)))
     (mapcar (lambda (f)
               (let (proj)
                 (dolist (field fields)
-                  (setq proj (plist-put proj field (gitq--frame-field f field))))
+                  (setq proj (plist-put proj (intern (format ":%s" field))
+                                        (gitq--frame-field f field))))
                 (cons :type (cons 'projection proj))))
             frames)))
 

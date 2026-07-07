@@ -672,13 +672,16 @@ grep itself never sets :path-filter."
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--exec-step/pick ()
+  "Projected keys are keywords, matching every other frame type -- a bare
+symbol key would silently break keyword-based lookups downstream (e.g.
+`gitq--frame-commit-sha', the results-buffer RET/b/c commands)."
   (let* ((frames (list '(:type commit :sha "abc" :author "Alice" :message "msg")))
          (result (gitq--exec-step frames '(:type pick :fields (sha author)))))
     (should (= (length result) 1))
-    (should (equal (plist-get (car result) 'sha) "abc"))
-    (should (equal (plist-get (car result) 'author) "Alice"))
+    (should (equal (plist-get (car result) :sha) "abc"))
+    (should (equal (plist-get (car result) :author) "Alice"))
     ;; message was not picked
-    (should (null (plist-get (car result) 'message)))))
+    (should (null (plist-get (car result) :message)))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--exec-step — sort
@@ -818,6 +821,45 @@ grep itself never sets :path-filter."
       (should (>= (length frames) 1))
       (should (eq (plist-get (car frames) :type) 'diff))
       (should (plist-get (car frames) :path)))))
+
+(ert-deftest gitq-test--integration/via-diff-root-commit ()
+  "via .diff on a root commit (no parent) must diff against the empty
+tree via `--root', not crash or silently swallow a git error message
+as if it were real path data.  Before the fix, `sha^' on a root commit
+is an invalid revision; `gitq--git' mixed that error text into stdout,
+so the bogus error lines came back looking like real (garbage) paths."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "a.txt" "line1\n" "initial")
+    (let* ((root   (gitq--fetch-commit "HEAD"))
+           (frames (gitq--exec-via (list root) '(:type via :morphism diff))))
+      (should (= (length frames) 1))
+      (should (equal (plist-get (car frames) :path) "a.txt"))
+      (should (null (plist-get (car frames) :parent-sha))))))
+
+(ert-deftest gitq-test--integration/git-does-not-leak-stderr-into-output ()
+  "`gitq--git' must discard stderr, not mix it into the captured stdout
+buffer -- otherwise a git error message gets split into lines and
+returned as if it were real output."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "a.txt" "line1\n" "initial")
+    ;; "HEAD^" on a root commit is an invalid revision -- git writes an
+    ;; error to stderr and nothing to stdout.
+    (should (null (gitq--git "diff-tree" "-r" "--name-only" "--no-commit-id"
+                             "HEAD^" "HEAD")))))
+
+(ert-deftest gitq-test--integration/pick-keys-are-keywords ()
+  "Regression test: `pick' must project onto keyword keys so downstream
+keyword-based lookups (`gitq--frame-commit-sha', the results-buffer
+RET/b/c commands) still resolve on picked frames."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "a.txt" "line1\n" "initial commit")
+    (let* ((result (car (gitq--exec-nodes (gitq--parse-flat "commits pick sha, message"))))
+           (frame  (car result)))
+      (should (equal (plist-get frame :message) "initial commit"))
+      (should (equal (gitq--frame-commit-sha frame) (plist-get frame :sha))))))
 
 (ert-deftest gitq-test--integration/via-tree-entries ()
   "via .tree.entries[Blob] returns blob frames."
