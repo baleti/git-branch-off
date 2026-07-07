@@ -535,6 +535,7 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
 
 (define-derived-mode gitq-results-mode special-mode "GitQ"
   "Major mode for displaying gitq pipeline results."
+  :interactive nil
   (setq truncate-lines t))
 
 (defun gitq--insert-frame (frame)
