@@ -158,7 +158,9 @@ since `path' needs a `:path' field and commit frames don't carry one."
                     ("pickaxe"  "\"x\"")
                     ("path"     "\"*\"")
                     ("pick"     "sha")
-                    ("where"    "sha")
+                    ;; a bare non-flag field is a type error now, so the
+                    ;; `where' dummy must be a full typed condition
+                    ("where"    "message contains \"x\"")
                     (_          "")))
            (pipeline (string-trim (format "%s %s %s" source kw dummy)))
            (nodes    (gitq--parse-flat pipeline)))
@@ -174,9 +176,10 @@ since `path' needs a `:path' field and commit frames don't carry one."
     (should (eq (plist-get (cadr nodes) :type) 'last))))
 
 (ert-deftest gitq-flat-test/p3-step-keyword-after-step ()
-  "P3: every step keyword after another step starts a new step node."
-  ;; where author ... take 5 — take starts a new step after where
-  (let ((nodes (gitq--parse-flat "commits where author take 3")))
+  "P3: every step keyword after another step starts a new step node.
+Bare where-conditions are flag-typed only, so the fixture uses a
+worktree source (`modified' is a flag; commit frames have none)."
+  (let ((nodes (gitq--parse-flat "worktrees where modified take 3")))
     (should (= (length nodes) 3))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'where))
@@ -257,8 +260,8 @@ since `path' needs a `:path' field and commit frames don't carry one."
 ;; The flat parser treats step keywords as boundaries so FLAG is always a bare flag.
 
 (ert-deftest gitq-flat-test/p5-bare-flag-before-take ()
-  "P5: 'where author take 5' — author is a bare flag, take starts next step."
-  (let* ((nodes (gitq--parse-flat "commits where author take 5"))
+  "P5: 'where modified take 5' — modified is a bare flag, take starts next step."
+  (let* ((nodes (gitq--parse-flat "worktrees where modified take 5"))
          (where (cadr nodes))
          (take  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
@@ -270,16 +273,22 @@ since `path' needs a `:path' field and commit frames don't carry one."
 
 (ert-deftest gitq-flat-test/p5-bare-flags-all-step-keywords ()
   "P5: 'where flag KEYWORD …' correctly identifies bare flag for every step keyword.
-Uses `blobs' (not `commits') for the `path' iteration specifically,
-since `path' needs a `:path' field and commit frames don't carry one —
-every other keyword's dummy arg is valid against commit fields."
-  (dolist (kw (remove "first" (remove "last" gitq-flat-test--all-step-keywords)))
-    (let* ((source (if (equal kw "path") "blobs" "commits"))
-           (arg (pcase kw
-                  ("take" "1") ("skip" "0") ("sort" "date")
-                  ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
-                  ("path" "\"*\"") ("pick" "sha") ("where" "sha") (_ "")))
-           (pipeline (string-trim (format "%s where sha %s %s" source kw arg)))
+Bare where-conditions are only valid on flag-typed fields now, and only
+worktree frames carry flags — so the source is `worktrees' throughout
+and each keyword's dummy arg must be valid against worktree fields
+(sha, path, branch, and the flags). `via .parent' would be a domain
+error on worktree frames (no `parents-count'), so the via dummy is
+`.parent†', which only needs `sha'.
+
+`path' is excluded: on a path-carrying frame, `path' directly after a
+where-condition always chains as another where FIELD, never as the
+standalone path step — see the dedicated ambiguity test below."
+  (dolist (kw (remove "path" (remove "first" (remove "last" gitq-flat-test--all-step-keywords))))
+    (let* ((arg (pcase kw
+                  ("take" "1") ("skip" "0") ("sort" "branch")
+                  ("via" ".parent†") ("grep" "\"x\"") ("pickaxe" "\"x\"")
+                  ("pick" "sha") ("where" "staged") (_ "")))
+           (pipeline (string-trim (format "worktrees where modified %s %s" kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (where    (cadr nodes))
            (cond1    (car (plist-get where :conditions))))
@@ -288,8 +297,8 @@ every other keyword's dummy arg is valid against commit fields."
               ))))
 
 (ert-deftest gitq-flat-test/p5-multi-condition-bare-flag ()
-  "P5: 'where author, message take 3' — both bare flags, then take."
-  (let* ((nodes  (gitq--parse-flat "commits where author, message take 3"))
+  "P5: 'where modified, staged take 3' — both bare flags, then take."
+  (let* ((nodes  (gitq--parse-flat "worktrees where modified, staged take 3"))
          (where  (cadr nodes))
          (conds  (plist-get where :conditions))
          (take   (nth 2 nodes)))
@@ -300,14 +309,31 @@ every other keyword's dummy arg is valid against commit fields."
     (should (= (plist-get take :n) 3))))
 
 (ert-deftest gitq-flat-test/p5-bare-flag-before-terminal ()
-  "P5: 'where author /show' — author is a bare flag, /show is terminal."
-  (let* ((nodes (gitq--parse-flat "commits where author /show"))
+  "P5: 'where modified /show' — modified is a bare flag, /show is terminal."
+  (let* ((nodes (gitq--parse-flat "worktrees where modified /show"))
          (where (cadr nodes))
          (term  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
     (should (eq (plist-get cond1 :op) 'is))
     (should (eq (plist-get term :type) 'terminal))
     (should (eq (plist-get term :op) 'show))))
+
+(ert-deftest gitq-flat-test/p5-path-step-after-where-is-loud ()
+  "On a path-carrying frame, a `path' STEP directly after a where-clause
+is unwritable — `path' chains as a where FIELD instead, and its glob
+argument then fails operator validation LOUDLY.  It used to silently
+parse as a garbage condition (operator `\"*\"', value t) that matched
+nothing.  Write `path GLOB' before `where', or use `where path matches'."
+  (let ((err (should-error (gitq--parse-flat "worktrees where modified path \"*\""))))
+    (should (string-match-p "unknown where operator" (error-message-string err)))))
+
+(ert-deftest gitq-flat-test/p5-bare-non-flag-field-still-hits-boundary ()
+  "P5 under typing: a bare NON-flag field before a step keyword is a
+flag-type error — proving the boundary was still detected (the step
+keyword was NOT consumed as a where-operator, which would raise the
+unknown-operator error instead)."
+  (let ((err (should-error (gitq--parse-flat "commits where author take 5"))))
+    (should (string-match-p "tests a flag" (error-message-string err)))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────
 ;;; PROPERTY P6: Source range terminates at step keywords
@@ -337,7 +363,7 @@ and covered separately by `p6-range-then-diff-then-path' below."
     (let* ((arg (pcase kw
                   ("take" "1") ("skip" "0") ("sort" "date")
                   ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
-                  ("pick" "sha") ("where" "sha") (_ "")))
+                  ("pick" "sha") ("where" "message contains \"x\"") (_ "")))
            (pipeline (string-trim (format "commits in main %s %s" kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (src      (car nodes)))
@@ -587,13 +613,16 @@ bare commit-shaped source."
     (should (equal (plist-get cond1 :value) "src/x.ts"))))
 
 (ert-deftest gitq-flat-test/field-path-chained-without-comma ()
-  "`path' resolves as a second, comma-less chained field, not a new stage."
-  (let* ((nodes (gitq--parse-flat "blobs where sha path == \"src/x.ts\""))
+  "`path' resolves as a second, comma-less chained field, not a new stage.
+The chained-bare-field position needs a flag-typed first field under
+the type rules, so the fixture is a worktree pipeline (`modified' is a
+flag and worktree frames also carry `path')."
+  (let* ((nodes (gitq--parse-flat "worktrees where modified path == \"src/x.ts\""))
          (where (cadr nodes))
          (conds (plist-get where :conditions)))
     (should (= (length nodes) 2))              ; source, where (no terminal)
     (should (= (length conds) 2))
-    (should (eq (plist-get (nth 0 conds) :field) 'sha))
+    (should (eq (plist-get (nth 0 conds) :field) 'modified))
     (should (eq (plist-get (nth 1 conds) :field) 'path))))
 
 (ert-deftest gitq-flat-test/field-path-in-pick-comma-list ()

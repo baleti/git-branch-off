@@ -505,14 +505,22 @@ commands, ...)."
             frames)))
 
 (defun gitq--exec-sort (frames node)
-  "Sort FRAMES by the field in NODE."
-  (let ((field (plist-get node :field))
-        (desc  (plist-get node :desc)))
+  "Sort FRAMES by the field in NODE, using the field's scalar type.
+Number fields compare numerically — `sort parents-count' used to crash
+with a wrong-type-argument, since every comparison went through
+`string<'.  Date fields (git's ISO-8601 %ai format) and everything else
+compare lexically, which for ISO dates is chronological order."
+  (let* ((field (plist-get node :field))
+         (desc  (plist-get node :desc))
+         (cmp   (if (eq (gitq--field-type field) 'number)
+                    (lambda (a b) (< (if (numberp a) a 0) (if (numberp b) b 0)))
+                  (lambda (a b) (string< (if (stringp a) a "")
+                                         (if (stringp b) b ""))))))
     (sort (copy-sequence frames)
           (lambda (a b)
-            (let ((va (or (gitq--frame-field a field) ""))
-                  (vb (or (gitq--frame-field b field) "")))
-              (if desc (string> va vb) (string< va vb)))))))
+            (let ((va (gitq--frame-field a field))
+                  (vb (gitq--frame-field b field)))
+              (if desc (funcall cmp vb va) (funcall cmp va vb)))))))
 
 (defun gitq--exec-step (frames step)
   "Execute one pipeline STEP against FRAMES, returning new frame list."
@@ -529,7 +537,10 @@ commands, ...)."
       ('first   (when frames (list (car frames))))
       ('last    (when frames (list (car (last frames)))))
       ('sort    (gitq--exec-sort frames step))
-      (_        frames))))
+      ;; The parser can't produce anything else; reaching here means an
+      ;; internal inconsistency, which must not silently pass frames
+      ;; through unchanged as it used to.
+      (_        (error "gitq: internal error: unknown step type '%s'" type)))))
 
 ;;; Terminal operations
 
@@ -850,6 +861,53 @@ of the same name (the standalone `path GLOB' step) — see
 `gitq--complete--enclosing-step' and `pick's field-list loop, both of
 which are written to disambiguate this correctly.")
 
+(defconst gitq--field-types
+  '(("sha" . sha) ("author" . string) ("email" . string) ("date" . date)
+    ("message" . string) ("path" . string) ("name" . string) ("branch" . string)
+    ("parents-count" . number) ("modified" . flag) ("staged" . flag)
+    ("untracked" . flag) ("tree" . sha) ("reftype" . string)
+    ("detached" . flag) ("mode" . string) ("parent-sha" . sha)
+    ("commit-sha" . sha) ("start-line" . number) ("end-line" . number)
+    ("line-number" . number) ("content" . string))
+  "Scalar type of each field in `gitq--field-names'.
+The structural field-SET typing below answers \"does this frame carry
+this field at all?\"; this table answers the next question, \"which
+where-operators and sort order make sense on it?\".  Every field name
+must appear in both — `gitq--flat-parse-where' and `gitq--exec-sort'
+look types up unconditionally.")
+
+(defconst gitq--operator-signatures
+  '(("=="       . (string sha date number flag))
+    ("!="       . (string sha date number flag))
+    (">"        . (number))
+    ("<"        . (number))
+    (">="       . (number))
+    ("<="       . (number))
+    ("contains" . (string sha))
+    ("matches"  . (string sha))
+    ("after"    . (date))
+    ("before"   . (date))
+    ("within"   . (date))
+    ("is"       . (flag)))
+  "For each where-operator, the field scalar types it accepts.
+A closed list, checked at parse time: an operator not in this table is
+an unknown-operator parse error (it used to parse fine and only blow up
+— or worse, silently match nothing — when the condition was evaluated),
+and applying an operator to a field whose type it doesn't accept (e.g.
+`date > \"2020-01-01\"', where `>' compares numbers so the condition was
+always silently false) is a parse-time type error suggesting the
+operators that DO fit the field.")
+
+(defun gitq--field-type (field)
+  "Return the scalar type symbol for FIELD (a string or symbol).
+Fields projected into existence by `pick' keep their original names, so
+this lookup covers them too.  Unknown fields default to `string' — the
+weakest assumption — rather than erroring, because `pick'ed projections
+are open-ended."
+  (or (cdr (assoc (if (symbolp field) (symbol-name field) field)
+                  gitq--field-types))
+      'string))
+
 ;; Structural field-set typing: each of these is the exact set of
 ;; fields one particular frame *shape* actually carries, taken directly
 ;; from where that shape is constructed (`gitq--parse-commit-line',
@@ -1087,19 +1145,44 @@ at run time because commit frames have no `:name'."
            (car tokens) (string-join current-fields ", ")))
   (let (conditions)
     (while (and tokens (member (car tokens) current-fields))
-      (let* ((field     (intern (pop tokens)))
+      (let* ((field-tok (pop tokens))
+             (field     (intern field-tok))
+             (ftype     (gitq--field-type field-tok))
              (next      (car tokens)))
         (cond
-         ;; Bare flag: next token is a boundary, comma, or another field
+         ;; Bare flag: next token is a boundary, comma, or another field.
+         ;; Only meaningful for flag-typed fields — a bare `where author'
+         ;; used to parse as (author is t), which `is' evaluates as
+         ;; equality against t, silently matching nothing.
          ((or (null next) (equal next ",")
               (member next current-fields)
               (gitq--flat-boundary-p next))
+          (unless (eq ftype 'flag)
+            (error "gitq: bare 'where %s' tests a flag, but '%s' is a %s field (add an operator and value)"
+                   field-tok field-tok ftype))
           (push (list :field field :op 'is :value t) conditions))
          ;; Operator present
          (t
           (let* ((op-tok (pop tokens))
                  (op     (intern op-tok))
+                 (sig    (assoc op-tok gitq--operator-signatures))
                  (next2  (car tokens)))
+            ;; Operators are a closed set, and each accepts only some
+            ;; field types — both are parse-time errors now, not
+            ;; runtime surprises (a bogus operator errored only when a
+            ;; frame reached it; a type mismatch like `date > ...' was
+            ;; silently false forever).
+            (unless sig
+              (error "gitq: unknown where operator '%s' (expected one of: %s)"
+                     op-tok
+                     (mapconcat #'car gitq--operator-signatures ", ")))
+            (unless (memq ftype (cdr sig))
+              (error "gitq: operator '%s' does not apply to '%s' (a %s field; try: %s)"
+                     op-tok field-tok ftype
+                     (mapconcat #'car
+                                (seq-filter (lambda (s) (memq ftype (cdr s)))
+                                            gitq--operator-signatures)
+                                ", ")))
             (cond
              ;; Step keyword immediately after an operator that requires a value:
              ;; this is always an error — the keyword must be quoted.
@@ -1107,10 +1190,16 @@ at run time because commit frames have no `:name'."
               (error
                "gitq: '%s' requires a value; step keyword '%s' must be quoted: \"%s\""
                op-tok next2 next2))
-             ;; No value: nil, comma, another field, or /terminal after operator
+             ;; No value after the operator.  Only `is' works valueless
+             ;; (an explicit flag test); every other operator used to
+             ;; get :value t here and silently match nothing.
              ((or (null next2) (equal next2 ",")
                   (member next2 current-fields)
                   (gitq--flat-terminal-p next2))
+              (unless (eq op 'is)
+                (error "gitq: operator '%s' requires a value, got %s"
+                       op-tok
+                       (if next2 (format "'%s'" next2) "end of input")))
               (push (list :field field :op op :value t) conditions))
              ;; Normal value
              (t
@@ -1121,6 +1210,12 @@ at run time because commit frames have no `:name'."
                                ((string-match-p "^[0-9]+$" val-tok)
                                 (string-to-number val-tok))
                                (t val-tok))))
+                ;; A number-typed field compared with `equal'/arithmetic
+                ;; against a non-numeric value can never match — say so
+                ;; now instead of silently returning nothing.
+                (when (and (eq ftype 'number) (not (numberp val)))
+                  (error "gitq: '%s' is a number field; '%s' is not a number"
+                         field-tok val-tok))
                 (push (list :field field :op op :value val) conditions))))))))
       (when (equal (car tokens) ",")
         (pop tokens)
@@ -1249,6 +1344,11 @@ commit's fields from a ref's or a hunk's."
              (unless (equal tok ",")
                (push tok fields))))
          (setq fields (nreverse fields))
+         ;; `pick' with nothing to pick used to parse fine and project
+         ;; every frame down to (:type projection) — data silently gone.
+         (unless fields
+           (error "gitq: 'pick' requires at least one field name, got %s"
+                  (if tokens (format "'%s'" (car tokens)) "end of input")))
          (list (list :type 'pick :fields (mapcar #'intern fields)) tokens fields)))
       ("take"
        (list (list :type 'take :n (gitq--flat-parse-count (pop tokens) "take")) tokens current-fields))

@@ -1550,5 +1550,65 @@ which ref frames have) is still offered."
     (should (member ".tree.blobs" cands))
     (should (member ".diff" cands))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: scalar field types (where operators, sort comparators)
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--scalar/unknown-operator-is-parse-error ()
+  (let ((err (should-error (gitq--parse-flat "commits where author sortof \"x\""))))
+    (should (string-match-p "unknown where operator" (error-message-string err)))))
+
+(ert-deftest gitq-test--scalar/numeric-op-on-date-is-parse-error ()
+  "`date > ...' used to be silently false forever; now it is a type error
+suggesting the date operators."
+  (let ((err (should-error (gitq--parse-flat "commits where date > 2020-01-01"))))
+    (should (string-match-p "after" (error-message-string err)))))
+
+(ert-deftest gitq-test--scalar/operator-without-value-is-parse-error ()
+  "`author ==' with no value used to parse as :value t and match nothing."
+  (let ((err (should-error (gitq--parse-flat "commits where author == take 5"))))
+    (should (string-match-p "requires a value" (error-message-string err))))
+  (let ((err (should-error (gitq--parse-flat "commits where author == /show"))))
+    (should (string-match-p "requires a value" (error-message-string err)))))
+
+(ert-deftest gitq-test--scalar/non-numeric-value-on-number-field-errors ()
+  (let ((err (should-error (gitq--parse-flat "commits where parents-count == \"two\""))))
+    (should (string-match-p "not a number" (error-message-string err)))))
+
+(ert-deftest gitq-test--scalar/is-still-valueless-on-flags ()
+  (let* ((nodes (gitq--parse-flat "worktrees where detached is"))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :op) 'is))
+    (should (eq (plist-get cond1 :value) t))))
+
+(ert-deftest gitq-test--scalar/pick-without-fields-is-parse-error ()
+  "`pick' with nothing to pick used to project every frame to nothing."
+  (let ((err (should-error (gitq--parse-flat "commits pick /show"))))
+    (should (string-match-p "at least one field" (error-message-string err)))))
+
+(ert-deftest gitq-test--scalar/sort-numeric-field-sorts-numerically ()
+  "`sort parents-count' used to crash: numbers went through `string<'."
+  (let* ((frames (list (list :type 'commit :sha "a" :parents '("x" "y"))
+                       (list :type 'commit :sha "b" :parents nil)
+                       (list :type 'commit :sha "c" :parents '("z"))))
+         (asc  (gitq--exec-step frames '(:type sort :field parents-count)))
+         (desc (gitq--exec-step frames '(:type sort :field parents-count :desc t))))
+    (should (equal (mapcar (lambda (f) (plist-get f :sha)) asc)  '("b" "c" "a")))
+    (should (equal (mapcar (lambda (f) (plist-get f :sha)) desc) '("a" "c" "b")))))
+
+(ert-deftest gitq-test--scalar/exec-step-unknown-type-errors ()
+  "An unknown step type is an internal error, never a silent pass-through."
+  (should-error (gitq--exec-step (gitq-test--commits 2) '(:type bogus-step))))
+
+(ert-deftest gitq-test--registry/every-field-has-a-scalar-type ()
+  (dolist (field gitq--field-names)
+    (should (assoc field gitq--field-types))))
+
+(ert-deftest gitq-test--registry/operator-completions-match-signatures ()
+  "The where-operator completion list and the operator signature table
+hold exactly the same operators."
+  (should (equal (sort (copy-sequence gitq--complete-where-operators) #'string<)
+                 (sort (mapcar #'car gitq--operator-signatures) #'string<))))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here
