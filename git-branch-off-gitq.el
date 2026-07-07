@@ -263,100 +263,123 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
                     (push p queue)))))))))
     (nreverse result)))
 
+(defvar gitq--morphisms)                ; registry; defined with the parser below
+
 (defun gitq--exec-via (frames node)
-  "Traverse morphism in NODE from FRAMES, returning new frames."
-  (let ((m (plist-get node :morphism)))
-    (pcase m
-      ('parent
-       (cond
-        ((plist-get node :star) (gitq--traverse-parents-star frames))
-        ((plist-get node :plus) (gitq--traverse-parents-star frames t))
-        ((numberp (plist-get node :index))
-         (let ((idx (plist-get node :index)))
-           (delq nil (mapcar (lambda (f)
-                               (gitq--fetch-commit
-                                (nth idx (plist-get f :parents))))
-                             frames))))
-        (t
-         (delq nil
-               (apply #'append
-                      (mapcar (lambda (f)
-                                (mapcar #'gitq--fetch-commit
-                                        (plist-get f :parents)))
-                              frames))))))
-      ('parent-adjoint
-       (let* ((target-shas (mapcar (lambda (f) (plist-get f :sha)) frames))
-              (all (gitq--fetch-commits)))
-         (seq-filter (lambda (c)
-                       (seq-some (lambda (p) (member p target-shas))
-                                 (plist-get c :parents)))
-                     all)))
-      ('tree
-       (delq nil
-             (mapcar (lambda (f)
-                       (let ((tree (plist-get f :tree)))
-                         (when tree (list :type 'tree :sha tree))))
-                     frames)))
-      ('tree-entries
-       (let ((filter (plist-get node :filter)))
-         (apply #'append
-                (mapcar (lambda (f)
-                          (let ((tree (or (and (eq (plist-get f :type) 'commit)
-                                              (plist-get f :tree))
-                                         (plist-get f :sha))))
-                            (when tree (gitq--fetch-blobs-at tree nil filter))))
+  "Traverse the morphism in NODE from FRAMES, via the morphism registry.
+Dispatches to the `:exec' function registered in `gitq--morphisms' for
+the node's `:morphism' symbol — the same table the parser and the
+type checker read, so the three can never disagree about which
+morphisms exist."
+  (let* ((m    (plist-get node :morphism))
+         (spec (alist-get m gitq--morphisms)))
+    (unless spec (error "gitq: internal error: unregistered morphism '%s'" m))
+    (funcall (plist-get spec :exec) frames node)))
+
+(defun gitq--via-parent (frames node)
+  "Parent morphism: first/indexed/all parents, or */+ ancestor closure."
+  (cond
+   ((plist-get node :star) (gitq--traverse-parents-star frames))
+   ((plist-get node :plus) (gitq--traverse-parents-star frames t))
+   ((numberp (plist-get node :index))
+    (let ((idx (plist-get node :index)))
+      (delq nil (mapcar (lambda (f)
+                          (gitq--fetch-commit
+                           (nth idx (plist-get f :parents))))
                         frames))))
-      ('diff
-       (let ((ref (plist-get node :ref)))
-         (apply #'append
-                (mapcar (lambda (f)
-                          (let* ((sha       (plist-get f :sha))
-                                 ;; A root commit (no parents) has no
-                                 ;; "sha^" to diff against -- `--root'
-                                 ;; diffs it against the empty tree
-                                 ;; instead of erroring on an invalid
-                                 ;; revision.
-                                 (no-parent (and (not ref) (null (plist-get f :parents))))
-                                 (other     (unless no-parent (or ref (format "%s^" sha))))
-                                 (paths     (if no-parent
-                                                (gitq--git "diff-tree" "--root" "-r"
-                                                          "--name-only" "--no-commit-id" sha)
-                                              (gitq--git "diff-tree" "-r" "--name-only"
-                                                        "--no-commit-id" other sha))))
-                            (mapcar (lambda (p)
-                                      (list :type 'diff :sha sha :path p
-                                            :parent-sha other))
-                                    paths)))
-                        frames))))
-      ('diff-hunks
-       (apply #'append
-              (mapcar (lambda (f)
-                        (let* ((sha    (plist-get f :sha))
-                               (parent (format "%s^" sha))
-                               (text   (string-join
-                                        (gitq--git "diff-tree" "-p" "--no-commit-id"
-                                                   "-r" parent sha)
-                                        "\n")))
-                          (gitq--parse-diff-hunks text sha)))
-                      frames)))
-      ('history
-       (apply #'append
-              (mapcar (lambda (f)
-                        (let* ((path (plist-get f :path))
-                               (shas (gitq--git "log" "--follow" "--format=%H" "--" path)))
-                          (delq nil
-                                (mapcar (lambda (sha)
-                                          (let ((c (gitq--fetch-commit sha)))
-                                            (when c
-                                              (append c (list :path path)))))
-                                        shas))))
-                      frames)))
-      ('commit
-       (delq nil
-             (mapcar (lambda (f)
-                       (gitq--fetch-commit (plist-get f :commit-sha)))
-                     frames)))
-      (_ (error "gitq: unknown morphism '%s'" m)))))
+   (t
+    (delq nil
+          (apply #'append
+                 (mapcar (lambda (f)
+                           (mapcar #'gitq--fetch-commit
+                                   (plist-get f :parents)))
+                         frames))))))
+
+(defun gitq--via-parent-adjoint (frames _node)
+  "Adjoint of parent: the commits whose parent is in FRAMES (children-of)."
+  (let* ((target-shas (mapcar (lambda (f) (plist-get f :sha)) frames))
+         (all (gitq--fetch-commits)))
+    (seq-filter (lambda (c)
+                  (seq-some (lambda (p) (member p target-shas))
+                            (plist-get c :parents)))
+                all)))
+
+(defun gitq--via-tree (frames _node)
+  "Tree morphism: each commit's tree object."
+  (delq nil
+        (mapcar (lambda (f)
+                  (let ((tree (plist-get f :tree)))
+                    (when tree (list :type 'tree :sha tree))))
+                frames)))
+
+(defun gitq--via-tree-entries (frames node)
+  "Tree-entries morphism: blob/subtree entries, optionally filtered."
+  (let ((filter (plist-get node :filter)))
+    (apply #'append
+           (mapcar (lambda (f)
+                     (let ((tree (or (and (eq (plist-get f :type) 'commit)
+                                          (plist-get f :tree))
+                                     (plist-get f :sha))))
+                       (when tree (gitq--fetch-blobs-at tree nil filter))))
+                   frames))))
+
+(defun gitq--via-diff (frames node)
+  "Diff morphism: paths changed vs. parent (or the node's :ref)."
+  (let ((ref (plist-get node :ref)))
+    (apply #'append
+           (mapcar (lambda (f)
+                     (let* ((sha       (plist-get f :sha))
+                            ;; A root commit (no parents) has no
+                            ;; "sha^" to diff against -- `--root'
+                            ;; diffs it against the empty tree
+                            ;; instead of erroring on an invalid
+                            ;; revision.
+                            (no-parent (and (not ref) (null (plist-get f :parents))))
+                            (other     (unless no-parent (or ref (format "%s^" sha))))
+                            (paths     (if no-parent
+                                           (gitq--git "diff-tree" "--root" "-r"
+                                                      "--name-only" "--no-commit-id" sha)
+                                         (gitq--git "diff-tree" "-r" "--name-only"
+                                                    "--no-commit-id" other sha))))
+                       (mapcar (lambda (p)
+                                 (list :type 'diff :sha sha :path p
+                                       :parent-sha other))
+                               paths)))
+                   frames))))
+
+(defun gitq--via-diff-hunks (frames _node)
+  "Diff-hunks morphism: changed line ranges vs. parent."
+  (apply #'append
+         (mapcar (lambda (f)
+                   (let* ((sha    (plist-get f :sha))
+                          (parent (format "%s^" sha))
+                          (text   (string-join
+                                   (gitq--git "diff-tree" "-p" "--no-commit-id"
+                                              "-r" parent sha)
+                                   "\n")))
+                     (gitq--parse-diff-hunks text sha)))
+                 frames)))
+
+(defun gitq--via-history (frames _node)
+  "History morphism: the commits that touched each frame's path."
+  (apply #'append
+         (mapcar (lambda (f)
+                   (let* ((path (plist-get f :path))
+                          (shas (gitq--git "log" "--follow" "--format=%H" "--" path)))
+                     (delq nil
+                           (mapcar (lambda (sha)
+                                     (let ((c (gitq--fetch-commit sha)))
+                                       (when c
+                                         (append c (list :path path)))))
+                                   shas))))
+                 frames)))
+
+(defun gitq--via-commit (frames _node)
+  "Commit morphism: resolve each frame's :commit-sha back to its commit."
+  (delq nil
+        (mapcar (lambda (f)
+                  (gitq--fetch-commit (plist-get f :commit-sha)))
+                frames)))
 
 (defun gitq--parse-diff-hunks (diff-text commit-sha)
   "Parse DIFF-TEXT into a list of hunk frame plists for COMMIT-SHA."
@@ -976,21 +999,102 @@ reached via `blobs' as a source, or `.tree.blobs'/`.tree.subtrees'/
     (blobs    . ,gitq--blob-fields))
   "The field-set each source keyword's frames start the pipeline with.")
 
-(defconst gitq--morphism-signatures
-  `((parent       . ("parents-count" . ,gitq--commit-fields))
-    (tree         . ("tree"          . ,gitq--tree-object-fields))
-    (tree-entries . ("sha"           . ,gitq--blob-fields))
-    (diff         . ("sha"           . ,gitq--diff-fields))
-    (diff-hunks   . ("sha"           . ,gitq--hunk-fields))
-    (history      . ("path"          . ,gitq--commit-fields))
-    (commit       . ("commit-sha"    . ,gitq--commit-fields)))
-  "For each morphism symbol (as stored in a `via' node's `:morphism'):
-\(REQUIRED-FIELD . OUTPUT-FIELDS). REQUIRED-FIELD must be present in
-the field-set flowing into the morphism, or it is a domain error (e.g.
-`.tree' needs `tree', which only commit frames have — applying it to a
-`branches' source used to silently return empty results instead of
-erroring, since ref frames' `:tree' is always nil). OUTPUT-FIELDS
-becomes the new current field-set after the morphism is applied.")
+(defconst gitq--morphisms
+  `((parent         :requires "parents-count" :yields ,gitq--commit-fields
+                    :exec gitq--via-parent)
+    (parent-adjoint :requires "sha"           :yields ,gitq--commit-fields
+                    :exec gitq--via-parent-adjoint)
+    (tree           :requires "tree"          :yields ,gitq--tree-object-fields
+                    :exec gitq--via-tree)
+    (tree-entries   :requires "sha"           :yields ,gitq--blob-fields
+                    :exec gitq--via-tree-entries)
+    (diff           :requires "sha"           :yields ,gitq--diff-fields
+                    :exec gitq--via-diff)
+    (diff-hunks     :requires "sha"           :yields ,gitq--hunk-fields
+                    :exec gitq--via-diff-hunks)
+    (history        :requires "path"          :yields ,gitq--commit-fields
+                    :exec gitq--via-history)
+    (commit         :requires "commit-sha"    :yields ,gitq--commit-fields
+                    :exec gitq--via-commit))
+  "The morphism registry: one entry per morphism symbol, the single
+source of truth for the parser, the type checker, and the executor.
+
+:requires — the field that must be present in the field-set flowing
+into the morphism (its domain), or the pipeline is a parse-time domain
+error (e.g. `.tree' needs `tree', which only commit frames have —
+applying it to a `branches' source used to silently return empty
+results, since ref frames' `:tree' is always nil).
+:yields — the field-set of the frames it produces (its codomain),
+which becomes the current field-set for the rest of the pipeline.
+:exec — the function (FRAMES NODE) -> FRAMES implementing it.
+
+Semantically each morphism maps one frame to a LIST of frames (parent
+of a merge is several commits, a tree has many entries); :exec is that
+map lifted pointwise over the incoming frame list with the results
+appended — Kleisli-style composition over the list monad, which is why
+chaining morphisms (`via .parent .tree' or the dotted `.parent.tree')
+needs no special cases anywhere: the output of any morphism is always
+the same shape of thing as its input.")
+
+(defconst gitq--morphism-forms
+  '(("\\.parent\\[\\([0-9]+\\)\\]" .
+     (lambda (arg) (list :type 'via :morphism 'parent
+                         :index (string-to-number arg))))
+    ("\\.parent\\*"           . (lambda (_) (list :type 'via :morphism 'parent :star t)))
+    ("\\.parent\\+"           . (lambda (_) (list :type 'via :morphism 'parent :plus t)))
+    ("\\.parent†"             . (lambda (_) (list :type 'via :morphism 'parent-adjoint)))
+    ("\\.parent"              . (lambda (_) (list :type 'via :morphism 'parent)))
+    ("\\.tree\\.entries\\[Blob\\]" . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'blob)))
+    ("\\.tree\\.entries\\[Tree\\]" . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'tree)))
+    ("\\.tree\\.entries"      . (lambda (_) (list :type 'via :morphism 'tree-entries :filter nil)))
+    ("\\.tree\\.blobs"        . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'blob)))
+    ("\\.tree\\.subtrees"     . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'tree)))
+    ("\\.tree"                . (lambda (_) (list :type 'via :morphism 'tree)))
+    ("\\.entries\\[Blob\\]"   . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'blob)))
+    ("\\.entries\\[Tree\\]"   . (lambda (_) (list :type 'via :morphism 'tree-entries :filter 'tree)))
+    ("\\.entries"             . (lambda (_) (list :type 'via :morphism 'tree-entries :filter nil)))
+    ("\\.diff\\.hunks"        . (lambda (_) (list :type 'via :morphism 'diff-hunks)))
+    ("\\.diff"                . (lambda (_) (list :type 'via :morphism 'diff :ref nil)))
+    ("\\.history"             . (lambda (_) (list :type 'via :morphism 'history)))
+    ("\\.commit"              . (lambda (_) (list :type 'via :morphism 'commit))))
+  "Surface forms a morphism path is built from: (REGEX . NODE-FN).
+Each regex matches one segment of a dotted path; NODE-FN receives the
+first capture group (or nil) and returns the via node for that segment.
+
+A path like `.parent[0].tree.entries[Blob]' is parsed by repeatedly
+taking the LONGEST form that matches at the current position (see
+`gitq--parse-morphism-path'), so any morphisms whose types line up can
+be composed by just writing them one after another — composition is
+generic, not a hardcoded list of allowed combinations.  The fused
+multi-segment forms here (`.tree.entries', `.diff.hunks', ...) are
+single morphisms for efficiency and history, but they parse, type-check
+and execute exactly as their name reads.")
+
+(defun gitq--parse-morphism-path (path)
+  "Parse PATH — one or more dotted morphism forms — into a list of via nodes.
+Greedy longest-match against `gitq--morphism-forms' at each position;
+a segment boundary must be a `.' or the end of the path.  Errors on
+the first unrecognizable segment, naming it and the full path."
+  (let ((pos 0) (len (length path)) nodes)
+    (unless (and (> len 0) (eq (aref path 0) ?.))
+      (error "gitq: unknown morphism '%s'" path))
+    (while (< pos len)
+      (let (best-node (best-end pos))
+        (dolist (entry gitq--morphism-forms)
+          (when (eq (string-match (car entry) path pos) pos)
+            (let ((end (match-end 0))
+                  (arg (match-string 1 path)))
+              (when (and (> end best-end)
+                         (or (= end len) (eq (aref path end) ?.)))
+                (setq best-end end
+                      best-node (funcall (cdr entry) arg))))))
+        (unless best-node
+          (error "gitq: unknown morphism '%s'%s"
+                 (substring path pos)
+                 (if (> pos 0) (format " (in '%s')" path) "")))
+        (push best-node nodes)
+        (setq pos best-end)))
+    (nreverse nodes)))
 
 (defun gitq--require-field (current-fields field context)
   "Error unless FIELD is present in CURRENT-FIELDS, naming CONTEXT.
@@ -1247,37 +1351,21 @@ at run time because commit frames have no `:name'."
      (t (cons (list :type 'source :source 'ref :ref kw) tokens)))))
 
 (defun gitq--flat-parse-via (tokens)
-  "Parse via-step morphism from flat TOKENS, returning (node . remaining).
-Handles the optional REF argument of .diff without consuming step keywords."
-  (let* ((path (pop tokens))
-         (node (cond
-                ((equal path ".parent")   (list :type 'via :morphism 'parent))
-                ((equal path ".parent*")  (list :type 'via :morphism 'parent :star t))
-                ((equal path ".parent+")  (list :type 'via :morphism 'parent :plus t))
-                ((string-match "^\\.parent\\[\\([0-9]+\\)\\]$" path)
-                 (list :type 'via :morphism 'parent
-                       :index (string-to-number (match-string 1 path))))
-                ((or (equal path ".parent†") (equal path ".parent†"))
-                 (list :type 'via :morphism 'parent-adjoint))
-                ((equal path ".tree")     (list :type 'via :morphism 'tree))
-                ((string-match "^\\.tree\\.entries\\(?:\\[\\(Blob\\|Tree\\)\\]\\)?$" path)
-                 (list :type 'via :morphism 'tree-entries
-                       :filter (when (match-string 1 path)
-                                 (if (equal (match-string 1 path) "Blob") 'blob 'tree))))
-                ((equal path ".tree.blobs")    (list :type 'via :morphism 'tree-entries :filter 'blob))
-                ((equal path ".tree.subtrees") (list :type 'via :morphism 'tree-entries :filter 'tree))
-                ((equal path ".diff")
-                 ;; Optional REF: consume only if not a step keyword or /terminal
-                 (let ((ref (when (and tokens
-                                       (not (gitq--flat-boundary-p (car tokens)))
-                                       (not (string-prefix-p "." (car tokens))))
-                              (pop tokens))))
-                   (list :type 'via :morphism 'diff :ref ref)))
-                ((equal path ".diff.hunks") (list :type 'via :morphism 'diff-hunks))
-                ((equal path ".history")    (list :type 'via :morphism 'history))
-                ((equal path ".commit")     (list :type 'via :morphism 'commit))
-                (t (error "gitq: unknown morphism '%s'" path)))))
-    (cons node tokens)))
+  "Parse a via-step morphism path from flat TOKENS, returning (nodes . remaining).
+The path may compose several morphisms (`.parent[0].tree.entries'), so
+NODES is a list of via nodes executed left to right — see
+`gitq--parse-morphism-path'.  When the FINAL morphism is `.diff', its
+optional REF argument is consumed from the following token, unless that
+token is a step keyword, /terminal, or another morphism path."
+  (let* ((path  (pop tokens))
+         (nodes (gitq--parse-morphism-path path))
+         (last-node (car (last nodes))))
+    (when (and (eq (plist-get last-node :morphism) 'diff)
+               tokens
+               (not (gitq--flat-boundary-p (car tokens)))
+               (not (string-prefix-p "." (car tokens))))
+      (plist-put last-node :ref (pop tokens)))
+    (cons nodes tokens)))
 
 (defun gitq--flat-parse-count (tok step-name)
   "Parse TOK as a non-negative integer count for STEP-NAME (\"take\"/\"skip\").
@@ -1299,13 +1387,21 @@ commit's fields from a ref's or a hunk's."
   (let ((kw (pop tokens)))
     (pcase kw
       ("via"
+       ;; A dotted path may compose several morphisms; type-check the
+       ;; chain by folding each morphism's registry signature: its
+       ;; :requires field must be in the field-set yielded by the
+       ;; previous one, and its :yields becomes the input to the next.
        (let* ((path-tok (car tokens))
               (result   (gitq--flat-parse-via tokens))
-              (node     (car result))
-              (sig      (alist-get (plist-get node :morphism) gitq--morphism-signatures)))
-         (when sig
-           (gitq--require-field current-fields (car sig) (format "via %s" path-tok)))
-         (list node (cdr result) (if sig (cdr sig) current-fields))))
+              (nodes    (car result))
+              (fields   current-fields))
+         (dolist (node nodes)
+           (let ((spec (alist-get (plist-get node :morphism) gitq--morphisms)))
+             (when spec
+               (gitq--require-field fields (plist-get spec :requires)
+                                    (format "via %s" path-tok))
+               (setq fields (plist-get spec :yields)))))
+         (list nodes (cdr result) fields)))
       ("where"
        (let ((r (gitq--flat-parse-where tokens current-fields)))
          (list (car r) (cdr r) current-fields)))
@@ -1397,8 +1493,14 @@ No pipe character required."
             (push (car result) nodes)
             (setq tokens nil)))     ; terminal is always last
          ((gitq--flat-step-p tok)
-          (let* ((result (gitq--flat-parse-step tokens fields)))
-            (push (nth 0 result) nodes)
+          (let* ((result (gitq--flat-parse-step tokens fields))
+                 (parsed (nth 0 result)))
+            ;; `via' yields a LIST of nodes (a composed morphism path);
+            ;; every other step yields a single node plist, which
+            ;; starts with a keyword.
+            (if (keywordp (car parsed))
+                (push parsed nodes)
+              (dolist (n parsed) (push n nodes)))
             (setq tokens (nth 1 result))
             (setq fields (nth 2 result))))
          (t
@@ -1412,10 +1514,15 @@ No pipe character required."
   "Source keywords offered at the start of a pipeline.")
 
 (defconst gitq--complete-morphisms
-  '(".parent" ".parent*" ".parent+" ".tree" ".tree.blobs" ".tree.subtrees"
-    ".tree.entries" ".tree.entries[Blob]" ".tree.entries[Tree]"
-    ".diff" ".diff.hunks" ".history" ".commit")
-  "Morphism paths offered after `via'.")
+  '(".parent" ".parent*" ".parent+" ".parent†" ".tree" ".tree.blobs"
+    ".tree.subtrees" ".tree.entries" ".tree.entries[Blob]"
+    ".tree.entries[Tree]" ".diff" ".diff.hunks" ".history" ".commit")
+  "Morphism paths offered after `via'.
+These are the canonical single-morphism forms; dotted compositions
+(`.parent.tree', `.parent[0].diff', ...) are typed by hand and parsed
+generically by `gitq--parse-morphism-path'.  Consistency with the
+parser and the registry is locked down by tests, not by construction —
+the parser accepts strictly more than this list offers.")
 
 (defconst gitq--complete-where-operators
   '("==" "!=" ">" "<" ">=" "<=" "contains" "matches" "after" "before" "within" "is")
@@ -1462,6 +1569,7 @@ of real commit dates.")
     (".parent"             . "first parent commit")
     (".parent*"            . "all reachable ancestors, inclusive")
     (".parent+"            . "all reachable ancestors, exclusive")
+    (".parent†"            . "children-of: commits whose parent is in the result")
     (".tree"               . "the commit's tree")
     (".tree.blobs"         . "blob entries in the tree")
     (".tree.subtrees"      . "subtree entries in the tree")
@@ -1630,14 +1738,15 @@ stage keyword itself."
 (defun gitq--morphism-requires (path)
   "Return the field the `via' morphism PATH (a `gitq--complete-morphisms'
 candidate string) needs present in the current field-set, or nil if
-PATH is unknown.  Reuses `gitq--flat-parse-via' (fed just PATH, with no
-domain check of its own) to extract the morphism symbol, then looks it
-up in `gitq--morphism-signatures' — the same table `gitq--flat-parse-step'
-enforces against at parse time, so completion can never offer a
-morphism the parser would then reject."
-  (let* ((node (ignore-errors (car (gitq--flat-parse-via (list path)))))
+PATH is unknown.  Only the FIRST morphism in the path constrains the
+incoming frame type, so a composed path is filtered by its head.
+Reuses `gitq--parse-morphism-path' to extract the morphism symbol, then
+looks it up in `gitq--morphisms' — the same registry
+`gitq--flat-parse-step' enforces against at parse time, so completion
+can never offer a morphism the parser would then reject."
+  (let* ((node (ignore-errors (car (gitq--parse-morphism-path path))))
          (morphism (and node (plist-get node :morphism))))
-    (car (alist-get morphism gitq--morphism-signatures))))
+    (plist-get (alist-get morphism gitq--morphisms) :requires)))
 
 (defun gitq--complete-candidates (input)
   "Return a list of completion candidates for the pipeline string INPUT.

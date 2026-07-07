@@ -1551,6 +1551,89 @@ which ref frames have) is still offered."
     (should (member ".diff" cands))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: morphism composition (dotted chains parse generically)
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--compose/parent-parent ()
+  "`.parent.parent' parses as TWO via nodes executed left to right."
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent.parent"))
+         (vias  (seq-filter (lambda (n) (eq (plist-get n :type) 'via)) nodes)))
+    (should (= (length vias) 2))
+    (should (cl-every (lambda (n) (eq (plist-get n :morphism) 'parent)) vias))))
+
+(ert-deftest gitq-test--compose/parent-index-tree ()
+  "`.parent[0].tree' composes an indexed parent with the tree morphism."
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent[0].tree"))
+         (vias  (seq-filter (lambda (n) (eq (plist-get n :type) 'via)) nodes)))
+    (should (= (length vias) 2))
+    (should (eq (plist-get (nth 0 vias) :morphism) 'parent))
+    (should (= (plist-get (nth 0 vias) :index) 0))
+    (should (eq (plist-get (nth 1 vias) :morphism) 'tree))))
+
+(ert-deftest gitq-test--compose/fused-forms-stay-single-nodes ()
+  "The fused multi-segment forms still parse to ONE node (longest match)."
+  (dolist (path '(".tree.entries" ".tree.entries[Blob]" ".tree.blobs"
+                  ".tree.subtrees" ".diff.hunks"))
+    (let* ((nodes (gitq--parse-flat (format "HEAD via %s" path)))
+           (vias  (seq-filter (lambda (n) (eq (plist-get n :type) 'via)) nodes)))
+      (should (= (length vias) 1)))))
+
+(ert-deftest gitq-test--compose/type-error-mid-chain ()
+  "`.tree.parent' is a domain error: a tree object has no parents-count."
+  (let ((err (should-error (gitq--parse-flat "HEAD via .tree.parent"))))
+    (should (string-match-p "parents-count" (error-message-string err)))))
+
+(ert-deftest gitq-test--compose/diff-ref-after-chain ()
+  "A trailing `.diff' in a chain still takes its optional REF token."
+  (let* ((nodes (gitq--parse-flat "HEAD via .parent.diff main"))
+         (diff  (car (last nodes))))
+    (should (eq (plist-get diff :morphism) 'diff))
+    (should (equal (plist-get diff :ref) "main"))))
+
+(ert-deftest gitq-test--compose/entries-history-typechecks ()
+  "`.tree.entries.history' composes: blob entries carry `path', which
+`.history' requires — the whole point of typing morphism chains."
+  (let* ((nodes (gitq--parse-flat "HEAD via .tree.entries.history"))
+         (vias  (seq-filter (lambda (n) (eq (plist-get n :type) 'via)) nodes)))
+    (should (= (length vias) 2))
+    (should (eq (plist-get (nth 1 vias) :morphism) 'history))))
+
+(ert-deftest gitq-test--compose/unknown-segment-names-it ()
+  "An unknown segment errors naming the bad segment and the full path."
+  (let ((err (should-error (gitq--parse-flat "HEAD via .parent.bogus"))))
+    (should (string-match-p "\\.bogus" (error-message-string err)))))
+
+(ert-deftest gitq-test--registry/every-completion-morphism-parses-and-is-registered ()
+  "Every morphism completion candidate parses, and every morphism symbol
+it produces has a full entry (:requires :yields :exec) in `gitq--morphisms'."
+  (dolist (path gitq--complete-morphisms)
+    (let ((nodes (gitq--parse-morphism-path path)))
+      (should nodes)
+      (dolist (node nodes)
+        (let ((spec (alist-get (plist-get node :morphism) gitq--morphisms)))
+          (should spec)
+          (should (plist-get spec :requires))
+          (should (plist-get spec :yields))
+          (should (fboundp (plist-get spec :exec))))))))
+
+(ert-deftest gitq-test--registry/every-morphism-form-is-registered ()
+  "Every surface form in `gitq--morphism-forms' constructs a node whose
+morphism symbol is registered — the executor can dispatch anything the
+path parser can produce."
+  (dolist (entry gitq--morphism-forms)
+    (let ((node (funcall (cdr entry) "0")))
+      (should (alist-get (plist-get node :morphism) gitq--morphisms)))))
+
+(ert-deftest gitq-test--registry/morphism-requires-known-fields ()
+  "Every :requires and :yields field in the morphism registry is a known
+field name (so type errors always name real fields)."
+  (dolist (entry gitq--morphisms)
+    (let ((spec (cdr entry)))
+      (should (member (plist-get spec :requires) gitq--field-names))
+      (dolist (f (plist-get spec :yields))
+        (should (member f gitq--field-names))))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: scalar field types (where operators, sort comparators)
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
