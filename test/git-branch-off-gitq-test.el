@@ -1693,5 +1693,69 @@ hold exactly the same operators."
   (should (equal (sort (copy-sequence gitq--complete-where-operators) #'string<)
                  (sort (mapcar #'car gitq--operator-signatures) #'string<))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: terminal coherence
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--registry/every-completion-terminal-parses ()
+  "Every terminal completion candidate must parse (this is the /worktree
+drift class of bug: completable, documented, tested — and unparseable)."
+  (dolist (term gitq--complete-terminals)
+    (let* ((nodes (gitq--parse-flat (format "commits %s" term)))
+           (last-node (car (last nodes))))
+      (should (eq (plist-get last-node :type) 'terminal)))))
+
+(ert-deftest gitq-test--terminal/delete-is-remove-alias ()
+  (let* ((nodes (gitq--parse-flat "commits first /delete"))
+         (term  (car (last nodes))))
+    (should (eq (plist-get term :op) 'remove))))
+
+(ert-deftest gitq-test--terminal/worktree-parses-with-optional-path ()
+  (let* ((term (car (last (gitq--parse-flat "commits first /worktree")))))
+    (should (eq (plist-get term :op) 'worktree))
+    (should (null (plist-get term :path))))
+  (let* ((term (car (last (gitq--parse-flat "commits first /worktree \"../wt\"")))))
+    (should (equal (plist-get term :path) "../wt"))))
+
+(ert-deftest gitq-test--terminal/amend-refuses-non-head-selection ()
+  "Amend only ever rewrites HEAD; a pipeline that selected some other
+commit must error, not silently amend HEAD anyway."
+  (cl-letf (((symbol-function 'gitq--git-string)
+             (lambda (&rest args)
+               (pcase (cadr args)
+                 ("HEAD" "headsha000")
+                 (_      (cadr args))))))
+    (should-error
+     (gitq--apply-terminal (list '(:type commit :sha "oldsha111"))
+                           '(:type terminal :op amend :no-edit t :message nil)
+                           "probe")
+     :type 'user-error)))
+
+(ert-deftest gitq-test--terminal/worktree-exec-uses-package-convention ()
+  "/worktree with no PATH adds a detached worktree at .worktree/<sha>."
+  (let (wt-args)
+    (cl-letf (((symbol-function 'gitq--git)
+               (lambda (&rest args)
+                 (when (equal (car args) "worktree") (setq wt-args args))
+                 nil))
+              ((symbol-function 'gitq--git-string)
+               (lambda (&rest _) "f00dfacef00dfacef00dfacef00dfacef00dface"))
+              ((symbol-function 'gitq--toplevel)
+               (lambda () "/repo/")))
+      (gitq--apply-terminal (list '(:type commit :sha "f00dface"))
+                            '(:type terminal :op worktree :path nil)
+                            "probe")
+      (should (equal (nth 1 wt-args) "add"))
+      (should (equal (nth 2 wt-args) "--detach"))
+      (should (string-suffix-p ".worktree/f00dfacef00dfacef00dfacef00dfacef00dface"
+                               (nth 3 wt-args))))))
+
+(ert-deftest gitq-test--terminal/unknown-op-in-executor-errors ()
+  "The executor must never silently degrade an unhandled terminal to /show."
+  (should-error
+   (gitq--apply-terminal (gitq-test--commits 1)
+                         '(:type terminal :op frobnicate)
+                         "probe")))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here

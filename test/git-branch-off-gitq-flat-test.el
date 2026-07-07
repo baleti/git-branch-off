@@ -423,15 +423,18 @@ bare commit-shaped source."
 ;;; ─────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-flat-test/all-terminals-parse ()
-  "Every /terminal keyword produces a terminal node at end of pipeline."
+  "Every /terminal keyword produces a terminal node at end of pipeline.
+/delete is an alias: it parses to the same op as /remove, so the
+executor can never again silently ignore it."
   (let ((simple-terminals
          '(("/show"     . show)
            ("/copy"     . copy)
            ("/insert"   . insert)
            ("/count"    . count)
            ("/remove"   . remove)
-           ("/delete"   . delete)
-           ("/stage"    . stage))))
+           ("/delete"   . remove)
+           ("/stage"    . stage)
+           ("/worktree" . worktree))))
     (dolist (pair simple-terminals)
       (let* ((nodes (gitq--parse-flat (format "commits %s" (car pair))))
              (term  (car (last nodes))))

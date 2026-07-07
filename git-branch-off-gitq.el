@@ -62,54 +62,88 @@ discarded here."
     (error "gitq: unexpected token '%s' after '%s' (missing quotes around a value?)"
            (car tokens) context)))
 
-(defun gitq--parse-terminal (kw tokens)
-  "Parse terminal operation KW with remaining TOKENS."
+(defun gitq--terminal--simple (op)
+  "Return a terminal parser for OP that accepts no arguments."
+  (lambda (tokens kw)
+    (gitq--expect-no-more tokens kw)
+    (list :type 'terminal :op op)))
+
+(defun gitq--terminal--optional-msg (op)
+  "Return a terminal parser for OP taking one optional quoted message."
+  (lambda (tokens kw)
+    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
+                 (gitq--unquote (car tokens)))))
+      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
+      (list :type 'terminal :op op :message msg))))
+
+(defun gitq--terminal--parse-branch-off (tokens kw)
+  "Parse /branch-off [NAME] [worktree PATH] from TOKENS."
+  (let* ((name (when (and tokens (string-prefix-p "\"" (car tokens)))
+                 (gitq--unquote (pop tokens))))
+         (wt   (when (equal (car tokens) "worktree")
+                 (pop tokens)
+                 (gitq--unquote (pop tokens)))))
+    (gitq--expect-no-more tokens kw)
+    (list :type 'terminal :op 'branch-off :name name :worktree wt)))
+
+(defun gitq--terminal--parse-amend (tokens kw)
+  "Parse /amend [no-edit|MSG] from TOKENS."
   (cond
-   ((equal kw "show")      (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'show))
-   ((equal kw "copy")      (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'copy))
-   ((equal kw "insert")    (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'insert))
-   ((equal kw "count")     (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'count))
-   ((equal kw "remove")    (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'remove))
-   ((equal kw "delete")    (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'delete))
-   ((equal kw "stage")     (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'stage))
-   ((equal kw "branch-off")
-    (let* ((name (when (and tokens (string-prefix-p "\"" (car tokens)))
-                   (gitq--unquote (pop tokens))))
-           (wt   (when (equal (car tokens) "worktree")
-                   (pop tokens)
-                   (gitq--unquote (pop tokens)))))
-      (gitq--expect-no-more tokens kw)
-      (list :type 'terminal :op 'branch-off :name name :worktree wt)))
-   ((equal kw "amend")
-    (cond
-     ((equal (car tokens) "no-edit")
-      (gitq--expect-no-more (cdr tokens) kw)
-      (list :type 'terminal :op 'amend :no-edit t :message nil))
-     ((and tokens (string-prefix-p "\"" (car tokens)))
-      (gitq--expect-no-more (cdr tokens) kw)
-      (list :type 'terminal :op 'amend :no-edit nil
-            :message (gitq--unquote (car tokens))))
-     (t (gitq--expect-no-more tokens kw)
-        (list :type 'terminal :op 'amend :no-edit nil :message nil))))
-   ((equal kw "squash")
-    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
-                 (gitq--unquote (car tokens)))))
-      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
-      (list :type 'terminal :op 'squash :message msg)))
-   ((equal kw "reword")
-    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
-                 (gitq--unquote (car tokens)))))
-      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
-      (list :type 'terminal :op 'reword :message msg)))
-   ((equal kw "commit")
-    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
-                 (gitq--unquote (car tokens)))))
-      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
-      (list :type 'terminal :op 'commit :message msg)))
-   ((equal kw "mark")
+   ((equal (car tokens) "no-edit")
     (gitq--expect-no-more (cdr tokens) kw)
-    (list :type 'terminal :op 'mark :label (when tokens (gitq--unquote (car tokens)))))
-   (t (error "gitq: unknown terminal operation '%s'" kw))))
+    (list :type 'terminal :op 'amend :no-edit t :message nil))
+   ((and tokens (string-prefix-p "\"" (car tokens)))
+    (gitq--expect-no-more (cdr tokens) kw)
+    (list :type 'terminal :op 'amend :no-edit nil
+          :message (gitq--unquote (car tokens))))
+   (t (gitq--expect-no-more tokens kw)
+      (list :type 'terminal :op 'amend :no-edit nil :message nil))))
+
+(defun gitq--terminal--parse-mark (tokens kw)
+  "Parse /mark [LABEL] from TOKENS."
+  (gitq--expect-no-more (cdr tokens) kw)
+  (list :type 'terminal :op 'mark :label (when tokens (gitq--unquote (car tokens)))))
+
+(defun gitq--terminal--parse-worktree (tokens kw)
+  "Parse /worktree [PATH] from TOKENS."
+  (let ((path (when (and tokens (string-prefix-p "\"" (car tokens)))
+                (gitq--unquote (pop tokens)))))
+    (gitq--expect-no-more tokens kw)
+    (list :type 'terminal :op 'worktree :path path)))
+
+(defconst gitq--terminals
+  (list
+   (cons "show"       (gitq--terminal--simple 'show))
+   (cons "copy"       (gitq--terminal--simple 'copy))
+   (cons "insert"     (gitq--terminal--simple 'insert))
+   (cons "count"      (gitq--terminal--simple 'count))
+   (cons "remove"     (gitq--terminal--simple 'remove))
+   ;; /delete is a true alias of /remove: it parses to the same op, so
+   ;; it can never again parse successfully and then fall through the
+   ;; executor to a silent no-op (which is what it used to do).
+   (cons "delete"     (gitq--terminal--simple 'remove))
+   (cons "stage"      (gitq--terminal--simple 'stage))
+   (cons "branch-off" #'gitq--terminal--parse-branch-off)
+   (cons "amend"      #'gitq--terminal--parse-amend)
+   (cons "squash"     (gitq--terminal--optional-msg 'squash))
+   (cons "reword"     (gitq--terminal--optional-msg 'reword))
+   (cons "commit"     (gitq--terminal--optional-msg 'commit))
+   (cons "mark"       #'gitq--terminal--parse-mark)
+   (cons "worktree"   #'gitq--terminal--parse-worktree))
+  "The terminal registry: NAME -> parser (TOKENS KW) -> terminal node.
+Single source of truth for what terminals exist — the completion
+candidate list derives from it, so completion can never again offer a
+terminal the parser rejects (/worktree was completable, documented,
+and listed in the test suite, yet unparseable, before this table
+existed).")
+
+(defun gitq--parse-terminal (kw tokens)
+  "Parse terminal operation KW with remaining TOKENS via `gitq--terminals'."
+  (let ((parser (cdr (assoc kw gitq--terminals))))
+    (unless parser
+      (error "gitq: unknown terminal operation '%s' (expected one of: %s)"
+             kw (mapconcat #'car gitq--terminals ", ")))
+    (funcall parser tokens kw)))
 
 ;;; Git data fetchers
 
@@ -750,7 +784,16 @@ immediately afterward keeps focus exactly where typing expects it."
        (message "gitq: created branch '%s'" name)))
     ('amend
      (let ((no-edit  (plist-get node :no-edit))
-           (msg      (plist-get node :message)))
+           (msg      (plist-get node :message))
+           (head     (gitq--git-string "rev-parse" "HEAD"))
+           (sel      (and frames (gitq--frame-commit-sha (car frames)))))
+       ;; `git commit --amend' only ever rewrites HEAD.  If the pipeline
+       ;; selected some other commit, silently amending HEAD instead
+       ;; would be doing something different from what the query says.
+       (when (and sel head
+                  (not (equal (gitq--git-string "rev-parse" sel) head)))
+         (user-error "gitq amend: selected commit %s is not HEAD (amend only rewrites HEAD; use /reword for older commits)"
+                     (substring sel 0 (min 8 (length sel)))))
        (cond
         (no-edit (gitq--git "commit" "--amend" "--no-edit"))
         (msg     (gitq--git "commit" "--amend" "-m" msg))
@@ -763,11 +806,15 @@ immediately afterward keeps focus exactly where typing expects it."
             (sha  (gitq--frame-commit-sha f))
             (msg  (plist-get node :message)))
        (unless sha (user-error "gitq reword: no commit in result"))
+       ;; A missing backing function must be a loud error, not a
+       ;; silently-does-nothing terminal (the /delete lesson).
        (if msg
-           (when (fboundp 'git-branch-off--reword-apply)
-             (git-branch-off--reword-apply sha msg))
-         (when (fboundp 'git-branch-off-reword)
-           (git-branch-off-reword sha)))))
+           (if (fboundp 'git-branch-off--reword-apply)
+               (git-branch-off--reword-apply sha msg)
+             (user-error "gitq reword: git-branch-off-reword.el is not loaded"))
+         (if (fboundp 'git-branch-off-reword)
+             (git-branch-off-reword sha)
+           (user-error "gitq reword: git-branch-off-reword.el is not loaded")))))
     ('squash
      (let ((msg (plist-get node :message)))
        (message "gitq squash: %d commits%s — use git-branch-off-squash for full support"
@@ -777,19 +824,23 @@ immediately afterward keeps focus exactly where typing expects it."
      (let* ((f   (car frames))
             (sha (gitq--frame-commit-sha f)))
        (unless sha (user-error "gitq remove: no commit in result"))
-       (when (fboundp 'git-branch-off-remove)
-         (git-branch-off-remove sha))))
+       (if (fboundp 'git-branch-off-remove)
+           (git-branch-off-remove sha)
+         (user-error "gitq remove: git-branch-off-reword.el is not loaded"))))
     ('commit
      (let ((msg (plist-get node :message)))
        (if msg
            (progn
              (gitq--git "commit" "-m" msg)
              (when (fboundp 'magit-refresh) (magit-refresh)))
-         (when (fboundp 'magit-commit-create)
-           (call-interactively #'magit-commit-create)))))
+         (if (fboundp 'magit-commit-create)
+             (call-interactively #'magit-commit-create)
+           (user-error "gitq commit: no message given and magit is not loaded (use /commit \"MSG\")")))))
     ('stage
-     (when (fboundp 'magit-stage-modified)
-       (magit-stage-modified)))
+     (if (fboundp 'magit-stage-modified)
+         (magit-stage-modified)
+       (gitq--git "add" "--update")
+       (message "gitq: staged modified files")))
     ('mark
      (let* ((f     (car frames))
             (sha   (gitq--frame-commit-sha f))
@@ -798,8 +849,24 @@ immediately afterward keeps focus exactly where typing expects it."
          (gitq--git "notes" "add" "-m" label sha)
          (message "gitq: marked %s with '%s'"
                   (substring sha 0 (min 8 (length sha))) label))))
-    (_
-     (gitq--display frames pipeline-str))))
+    ('worktree
+     (let* ((f   (car frames))
+            (sha (gitq--frame-commit-sha f)))
+       (unless sha (user-error "gitq worktree: no commit in result"))
+       ;; Default path follows the package's worktree convention:
+       ;; <repo-root>/.worktree/<full-40-char-hash> (see design.org).
+       (let* ((full (or (gitq--git-string "rev-parse" sha) sha))
+              (path (or (plist-get node :path)
+                        (expand-file-name (concat ".worktree/" full)
+                                          (gitq--toplevel)))))
+         (gitq--git "worktree" "add" "--detach" path full)
+         (when (fboundp 'magit-refresh) (magit-refresh))
+         (message "gitq: added worktree at %s" path))))
+    (op
+     ;; Every parseable terminal has a branch above; falling through
+     ;; used to silently degrade to /show, which is how /delete could
+     ;; parse fine and then not delete anything.
+     (error "gitq: internal error: unhandled terminal operation '%s'" op))))
 
 ;;; Main entry points
 
@@ -1529,9 +1596,10 @@ the parser accepts strictly more than this list offers.")
   "Operators offered after a field name in a where clause.")
 
 (defconst gitq--complete-terminals
-  '("/show" "/copy" "/insert" "/count" "/branch-off" "/amend"
-    "/squash" "/reword" "/remove" "/delete" "/commit" "/stage" "/mark" "/worktree")
-  "Terminal /command keywords.")
+  (mapcar (lambda (entry) (concat "/" (car entry))) gitq--terminals)
+  "Terminal /command keywords, derived from the `gitq--terminals'
+registry so the two can never drift apart (completion used to offer
+/worktree while the parser rejected it).")
 
 (defconst gitq--complete-date-within-examples
   '("1 day" "3 days" "1 week" "2 weeks" "1 month" "3 months" "6 months" "1 year")
