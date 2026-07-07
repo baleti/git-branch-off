@@ -1354,5 +1354,46 @@ fully-quoted, multi-word value case."
   (should (equal (gitq--tokenize-flat "where author == \"Alice Smith\"")
                  '("where" "author" "==" "\"Alice Smith\""))))
 
+;; Regression tests: a bare (unquoted) value that starts with a digit but
+;; contains letters or dashes -- SHA prefixes, plain dates -- used to split
+;; at the digit/letter or digit/dash boundary because the digit-starting
+;; tokenizer branch only consumed 0-9, unlike the letter-starting branch
+;; which consumed a much wider character class.  Fixed by giving the
+;; digit-starting branch the same continuation set.
+
+(ert-deftest gitq-test--tokenize-flat/bare-sha-prefix-is-one-token ()
+  (should (equal (gitq--tokenize-flat "where sha contains 062062e9af")
+                 '("where" "sha" "contains" "062062e9af"))))
+
+(ert-deftest gitq-test--tokenize-flat/bare-date-is-one-token ()
+  (should (equal (gitq--tokenize-flat "where date after 2026-05-25")
+                 '("where" "date" "after" "2026-05-25"))))
+
+(ert-deftest gitq-test--parse/bare-sha-prefix-where-value ()
+  (should (equal (gitq--parse-flat "commits where sha contains 062062e9af")
+                 '((:type source :source commits :range nil)
+                   (:type where :conditions ((:field sha :op contains :value "062062e9af")))))))
+
+(ert-deftest gitq-test--parse/bare-date-where-value ()
+  (should (equal (gitq--parse-flat "commits where date after 2026-05-25")
+                 '((:type source :source commits :range nil)
+                   (:type where :conditions ((:field date :op after :value "2026-05-25")))))))
+
+;; Regression tests: `take'/`skip' must reject a non-purely-numeric token
+;; rather than silently truncating it via `string-to-number' -- this became
+;; a live risk once the tokenizer above started merging digit-leading runs
+;; with trailing letters into a single token.
+
+(ert-deftest gitq-test--parse/take-non-numeric-errors ()
+  (should-error (gitq--parse-flat "commits take 5x")))
+
+(ert-deftest gitq-test--parse/skip-non-numeric-errors ()
+  (should-error (gitq--parse-flat "commits skip 3abc")))
+
+(ert-deftest gitq-test--parse/take-still-works ()
+  (should (equal (gitq--parse-flat "commits take 5")
+                 '((:type source :source commits :range nil)
+                   (:type take :n 5)))))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here

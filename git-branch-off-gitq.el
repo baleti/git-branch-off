@@ -910,8 +910,20 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
               (setq i (1+ i)))
             (push (substring str s i) tokens)))
          ((and (>= c ?0) (<= c ?9))
+          ;; A digit-starting bare word must consume the same extended
+          ;; run as the identifier branch below (letters, more digits,
+          ;; -/_///~/@/{/}), not just digits -- otherwise values that
+          ;; start with a digit but contain letters or dashes (SHA
+          ;; prefixes like 062062e9af, dates like 2026-05-25) silently
+          ;; split at the digit/letter or digit/dash boundary into two
+          ;; or more tokens instead of tokenizing as one bare word.
           (let ((s i))
-            (while (and (< i len) (>= (aref str i) ?0) (<= (aref str i) ?9))
+            (while (and (< i len)
+                        (let ((d (aref str i)))
+                          (or (and (>= d ?a) (<= d ?z))
+                              (and (>= d ?A) (<= d ?Z))
+                              (and (>= d ?0) (<= d ?9))
+                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?})))))
               (setq i (1+ i)))
             (push (substring str s i) tokens)))
          ((or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z)) (eq c ?_))
@@ -1054,6 +1066,14 @@ Handles the optional REF argument of .diff without consuming step keywords."
                 (t (error "gitq: unknown morphism '%s'" path)))))
     (cons node tokens)))
 
+(defun gitq--flat-parse-count (tok step-name)
+  "Parse TOK as a non-negative integer count for STEP-NAME (\"take\"/\"skip\").
+Errors naming the bad token rather than silently truncating it via
+`string-to-number' -- a token like \"5x\" must never be read as 5."
+  (unless (and tok (string-match-p "^[0-9]+$" tok))
+    (error "gitq: '%s' requires a number, got '%s'" step-name (or tok "end of input")))
+  (string-to-number tok))
+
 (defun gitq--flat-parse-step (tokens)
   "Parse one step node from flat TOKENS (first token must be a step keyword).
 Returns (node . remaining)."
@@ -1094,9 +1114,9 @@ Returns (node . remaining)."
                (push (intern tok) fields))))
          (cons (list :type 'pick :fields (nreverse fields)) tokens)))
       ("take"
-       (cons (list :type 'take :n (string-to-number (pop tokens))) tokens))
+       (cons (list :type 'take :n (gitq--flat-parse-count (pop tokens) "take")) tokens))
       ("skip"
-       (cons (list :type 'skip :n (string-to-number (pop tokens))) tokens))
+       (cons (list :type 'skip :n (gitq--flat-parse-count (pop tokens) "skip")) tokens))
       ("first" (cons (list :type 'first) tokens))
       ("last"  (cons (list :type 'last)  tokens))
       ("sort"
