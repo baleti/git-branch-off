@@ -894,16 +894,23 @@ entirely for a read-only preview (`gitq--preview-frames')."
 ;;   pipeline ::= source step* terminal?
 ;;   source   ::= "commits" ["in" range-tokens] | "HEAD" | BRANCH
 ;;               | "branches" | "tags" | "refs" | "worktrees" | "blobs"
-;;   step     ::= "via" MORPHISM | "where" conditions | "grep" PATTERN
+;;   step     ::= "via" MORPHISM-PATH | "where" conditions | "grep" PATTERN
 ;;               | "pickaxe" PATTERN ["regex"] | "path" GLOB
 ;;               | "pick" FIELD[,...] | "take" N | "skip" N
 ;;               | "first" | "last" | "sort" ["-"]FIELD
 ;;   terminal ::= "/show" | "/copy" | "/insert" | "/count" | "/branch-off" [NAME]
 ;;               | "/amend" ["no-edit"|MSG] | "/squash" [MSG] | "/reword" [MSG]
-;;               | "/remove" | "/delete" | "/commit" [MSG] | "/stage"
-;;               | "/mark" [LABEL] | "/worktree"
+;;               | "/remove" | "/delete" (alias of /remove) | "/commit" [MSG]
+;;               | "/stage" | "/mark" [LABEL] | "/worktree" [PATH]
+;;               (the closed set is the `gitq--terminals' registry)
+;;   MORPHISM-PATH ::= one or more dotted morphism forms, composed left to
+;;                  right and type-checked segment by segment: `.parent.tree'
+;;                  is `.parent' then `.tree' (see `gitq--parse-morphism-path')
 ;;   conditions ::= condition ("," condition)*
-;;   condition  ::= FIELD [OP value]
+;;   condition  ::= FLAG-FIELD | FIELD OP value
+;;                  OP must be registered for FIELD's scalar type
+;;                  (`gitq--operator-signatures' x `gitq--field-types');
+;;                  a bare condition is only valid on a flag-typed field
 ;;   FIELD      ::= one of `gitq--field-names' (bare word; unlike MORPHISM,
 ;;                  fields do not take a leading ".")
 ;;   value      ::= QUOTED | /REGEX/ | NUMBER | BARE-WORD (not a step keyword)
@@ -2131,14 +2138,22 @@ real, terminal included.
 PIPELINE syntax:  source [step...] [/terminal]
 
 Sources:   commits [in RANGE]  HEAD  BRANCH  branches  tags  refs  worktrees  blobs
-Steps:     via MORPHISM  where COND[,COND...]  grep PATTERN  pickaxe PATTERN
+Steps:     via MORPHISM-PATH  where COND[,COND...]  grep PATTERN  pickaxe PATTERN
            path GLOB  pick FIELD[,...]  take N  skip N  first  last  sort [-]FIELD
 Terminals: /show  /copy  /insert  /count  /branch-off [NAME]  /amend [no-edit|MSG]
            /squash [MSG]  /reword [MSG]  /remove  /delete  /commit [MSG]
-           /stage  /mark [LABEL]
+           /stage  /mark [LABEL]  /worktree [PATH]
+
+MORPHISM-PATH composes: `.parent[0].tree.entries' applies each morphism
+left to right, type-checked segment by segment at parse time — a chain
+whose types don't line up (e.g. `.tree.parent') is a parse-time domain
+error naming the missing field.
 
 FIELD is a closed, validated set (see `gitq--field-names'); referencing
-an unknown field is a parse-time error. Unlike MORPHISM, FIELD has no
+an unknown field is a parse-time error, and each field has a scalar
+type (`gitq--field-types') that its where-operators and sort order obey
+— `where date > ...' or `sort parents-count' as string comparison are
+type errors, not silent wrong answers. Unlike MORPHISM, FIELD has no
 leading \".\" (e.g. `where author == \"alice\"', not `where .author ...').
 
 Step keywords are reserved: quote them when used as values.

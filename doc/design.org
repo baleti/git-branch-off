@@ -16,6 +16,7 @@ The package is split into eight focused files plus a root entry-point:
 | =git-branch-off-squash.el=    | Mark system, topological chain building, async squash      |
 | =git-branch-off-blob.el=      | n/p navigation in magit-blob with branch-off awareness     |
 | =git-branch-off-search.el=    | Four async git history search commands with live preview   |
+| =git-branch-off-gitq.el=      | GitQ typed query language over the object graph (see [[file:gitq.org][gitq.org]]) |
 
 All public symbols use the =git-branch-off-= prefix.  Internal symbols use
 =git-branch-off--= (double dash).
