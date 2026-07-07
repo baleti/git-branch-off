@@ -206,7 +206,9 @@ contextually (with live preview of results as you type), and a standalone
 =bin/gitq= CLI plus zsh completion ship in the repo.
 
 The full design — the typed categorical model, grammar, and extension guide —
-is documented in [[file:doc/gitq.org][doc/gitq.org]].
+is documented in [[file:doc/gitq.org][doc/gitq.org]]; [[file:doc/examples.org][doc/examples.org]] is a set of worked examples
+with real captured outputs, including the pickaxe + =.diff.lines= workflow
+for seeing matched diff content in the results buffer.
 
 * Installation
 

@@ -17,6 +17,8 @@ happen to the result.
   HEAD via .tree.entries.history sort -date first /copy
 #+end_example
 
+(Worked examples with real captured outputs live in [[file:examples.org][examples.org]].)
+
 The syntax borrows deliberately:
 
 - from *PRQL*: a pipeline is a flat sequence of stages read left to right,
