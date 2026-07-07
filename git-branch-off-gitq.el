@@ -838,12 +838,109 @@ These always start a new stage; quote them when used as string values.")
     "tree" "reftype" "detached" "mode" "parent-sha" "commit-sha"
     "start-line" "end-line" "line-number" "content")
   "The closed set of field names `where', `sort', and `pick' accept.
-Used both for completion and for grammar validation: any field token
-that is not a member of this list is a parse-time error, not a
-silently-matches-nothing where-condition.  Note: `path' collides with
-the reserved step keyword of the same name (the standalone `path GLOB'
-step) — see `gitq--complete--enclosing-step' and `pick's field-list
-loop, both of which are written to disambiguate this correctly.")
+Used for completion (every field that could ever be valid *somewhere*)
+and for lexical disambiguation.  Grammar validation of any *particular*
+`where'/`sort'/`pick' reference is against the narrower, frame-type-
+specific lists below, threaded through the pipeline as `current-fields'
+— referencing a field that exists on some other frame type (e.g. `name'
+on a `commits' source) is a parse-time error naming exactly which
+fields the current frame actually has, not a silently-matches-nothing
+where-condition.  Note: `path' collides with the reserved step keyword
+of the same name (the standalone `path GLOB' step) — see
+`gitq--complete--enclosing-step' and `pick's field-list loop, both of
+which are written to disambiguate this correctly.")
+
+;; Structural field-set typing: each of these is the exact set of
+;; fields one particular frame *shape* actually carries, taken directly
+;; from where that shape is constructed (`gitq--parse-commit-line',
+;; `gitq--fetch-refs', `gitq--fetch-worktrees', `gitq--fetch-blobs-at',
+;; the `via'/`grep' executors in `gitq--exec-via'/`gitq--exec-grep').
+;; `gitq--parse-flat' threads the currently-active one of these through
+;; the whole pipeline as `current-fields', updating it after every
+;; source/`via'/`grep'/`pick' stage, and validates every `where'/`sort'/
+;; `pick'/`path'/`via' reference against it instead of the flat global
+;; union above. This is deliberately structural (keyed by field-set
+;; content) rather than nominal (keyed by the runtime `:type' tag),
+;; because two DIFFERENT shapes share the tag `tree': a whole tree
+;; object from `.tree' (just `:sha') vs. a subtree entry from
+;; `.tree.subtrees'/`.tree.entries[Tree]' (`:sha :path :mode', same
+;; shape as a blob entry) — the tag alone can't distinguish them, but
+;; the field-set naturally does.
+
+(defconst gitq--commit-fields
+  '("sha" "author" "email" "date" "message" "tree" "parents-count")
+  "Fields on a commit frame (`gitq--parse-commit-line').")
+
+(defconst gitq--ref-fields
+  '("sha" "name" "reftype")
+  "Fields on a ref frame (`gitq--fetch-branches'/`-tags'/`-refs').")
+
+(defconst gitq--worktree-fields
+  '("path" "sha" "branch" "detached" "modified" "staged" "untracked")
+  "Fields on a worktree frame (`gitq--fetch-worktrees').
+NOTE: `modified'/`staged'/`untracked' are declared here (and always
+have been, in the old global list) but `gitq--fetch-worktrees' never
+actually sets them — there is no working-tree-status wiring yet. They
+will type-check as valid but still always resolve to nil at runtime
+until that's implemented; this table doesn't fix that, only the
+field/frame-type mismatch class of bug.")
+
+(defconst gitq--blob-fields
+  '("sha" "path" "mode")
+  "Fields on a blob or tree-entry frame (`gitq--fetch-blobs-at';
+reached via `blobs' as a source, or `.tree.blobs'/`.tree.subtrees'/
+`.tree.entries[...]' as a morphism).")
+
+(defconst gitq--tree-object-fields
+  '("sha")
+  "Fields on a whole-tree-object frame (`.tree', not `.tree.entries').")
+
+(defconst gitq--diff-fields
+  '("sha" "path" "parent-sha")
+  "Fields on a diff frame (`.diff').")
+
+(defconst gitq--hunk-fields
+  '("path" "start-line" "end-line" "commit-sha")
+  "Fields on a hunk frame (`.diff.hunks'). Notably has no `sha' —
+`grep'/`pickaxe' (which need one) cannot follow this morphism.")
+
+(defconst gitq--line-fields
+  '("sha" "path" "line-number" "content" "commit-sha")
+  "Fields on a line frame (`grep' output).")
+
+(defconst gitq--source-fields
+  `((commits  . ,gitq--commit-fields)
+    (ref      . ,gitq--commit-fields) ; HEAD or a bare branch/tag/sha source resolves to one commit
+    (branches . ,gitq--ref-fields)
+    (tags     . ,gitq--ref-fields)
+    (refs     . ,gitq--ref-fields)
+    (worktree . ,gitq--worktree-fields)
+    (blobs    . ,gitq--blob-fields))
+  "The field-set each source keyword's frames start the pipeline with.")
+
+(defconst gitq--morphism-signatures
+  `((parent       . ("parents-count" . ,gitq--commit-fields))
+    (tree         . ("tree"          . ,gitq--tree-object-fields))
+    (tree-entries . ("sha"           . ,gitq--blob-fields))
+    (diff         . ("sha"           . ,gitq--diff-fields))
+    (diff-hunks   . ("sha"           . ,gitq--hunk-fields))
+    (history      . ("path"          . ,gitq--commit-fields))
+    (commit       . ("commit-sha"    . ,gitq--commit-fields)))
+  "For each morphism symbol (as stored in a `via' node's `:morphism'):
+\(REQUIRED-FIELD . OUTPUT-FIELDS). REQUIRED-FIELD must be present in
+the field-set flowing into the morphism, or it is a domain error (e.g.
+`.tree' needs `tree', which only commit frames have — applying it to a
+`branches' source used to silently return empty results instead of
+erroring, since ref frames' `:tree' is always nil). OUTPUT-FIELDS
+becomes the new current field-set after the morphism is applied.")
+
+(defun gitq--require-field (current-fields field context)
+  "Error unless FIELD is present in CURRENT-FIELDS, naming CONTEXT.
+CURRENT-FIELDS is nil-tolerant (an unknown/uninferred type just skips
+the check) so this never turns an inference gap into a false error."
+  (when (and current-fields (not (member field current-fields)))
+    (error "gitq: '%s' needs a '%s' field, but the current frame only has: %s"
+           context field (string-join current-fields ", "))))
 
 (defun gitq--tokenize-flat (str)
   "Tokenize a flat pipeline STR.
@@ -975,24 +1072,27 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
       (gitq--flat-step-p tok)
       (gitq--flat-terminal-p tok)))
 
-(defun gitq--flat-parse-where (tokens)
+(defun gitq--flat-parse-where (tokens current-fields)
   "Parse where-conditions from flat TOKENS, returning (node . remaining).
 Step keywords and /terminals act as stage boundaries and are never consumed
-as condition values.  FIELD tokens must be members of `gitq--field-names' —
-anything else right after `where' or a comma is an error naming the bad
-token, rather than silently ending the clause early or matching nothing
-at run time."
-  (unless (or (null tokens) (member (car tokens) gitq--field-names)
+as condition values.  FIELD tokens must be members of CURRENT-FIELDS — the
+field-set actually carried by the frame type flowing into this `where'
+(not the flat global union of every field on every frame type) — so
+e.g. `commits where name == ...' is a parse-time error naming exactly
+which fields a commit frame has, instead of silently matching nothing
+at run time because commit frames have no `:name'."
+  (unless (or (null tokens) (member (car tokens) current-fields)
               (gitq--flat-boundary-p (car tokens)))
-    (error "gitq: expected a field name after 'where', got '%s'" (car tokens)))
+    (error "gitq: field '%s' not valid here after 'where' (current frame has: %s)"
+           (car tokens) (string-join current-fields ", ")))
   (let (conditions)
-    (while (and tokens (member (car tokens) gitq--field-names))
+    (while (and tokens (member (car tokens) current-fields))
       (let* ((field     (intern (pop tokens)))
              (next      (car tokens)))
         (cond
          ;; Bare flag: next token is a boundary, comma, or another field
          ((or (null next) (equal next ",")
-              (member next gitq--field-names)
+              (member next current-fields)
               (gitq--flat-boundary-p next))
           (push (list :field field :op 'is :value t) conditions))
          ;; Operator present
@@ -1009,7 +1109,7 @@ at run time."
                op-tok next2 next2))
              ;; No value: nil, comma, another field, or /terminal after operator
              ((or (null next2) (equal next2 ",")
-                  (member next2 gitq--field-names)
+                  (member next2 current-fields)
                   (gitq--flat-terminal-p next2))
               (push (list :field field :op op :value t) conditions))
              ;; Normal value
@@ -1024,7 +1124,7 @@ at run time."
                 (push (list :field field :op op :value val) conditions))))))))
       (when (equal (car tokens) ",")
         (pop tokens)
-        (unless (and tokens (member (car tokens) gitq--field-names))
+        (unless (and tokens (member (car tokens) current-fields))
           (error "gitq: expected a field name after ',' in 'where', got '%s'"
                  (or (car tokens) "end of input")))))
     (cons (list :type 'where :conditions (nreverse conditions)) tokens)))
@@ -1092,21 +1192,38 @@ Errors naming the bad token rather than silently truncating it via
     (error "gitq: '%s' requires a number, got '%s'" step-name (or tok "end of input")))
   (string-to-number tok))
 
-(defun gitq--flat-parse-step (tokens)
+(defun gitq--flat-parse-step (tokens current-fields)
   "Parse one step node from flat TOKENS (first token must be a step keyword).
-Returns (node . remaining)."
+CURRENT-FIELDS is the field-set carried by the frame type flowing into
+this step. Returns (list NODE REMAINING-TOKENS NEW-FIELDS) — NEW-FIELDS
+is the field-set active after this step, since `via'/`grep'/`pick'
+change the frame shape and every later `where'/`sort'/`pick'/`path'/
+`via' reference must be checked against the shape actually in effect
+at that point, not a single flat global field list that can't tell a
+commit's fields from a ref's or a hunk's."
   (let ((kw (pop tokens)))
     (pcase kw
-      ("via" (gitq--flat-parse-via tokens))
-      ("where" (gitq--flat-parse-where tokens))
+      ("via"
+       (let* ((path-tok (car tokens))
+              (result   (gitq--flat-parse-via tokens))
+              (node     (car result))
+              (sig      (alist-get (plist-get node :morphism) gitq--morphism-signatures)))
+         (when sig
+           (gitq--require-field current-fields (car sig) (format "via %s" path-tok)))
+         (list node (cdr result) (if sig (cdr sig) current-fields))))
+      ("where"
+       (let ((r (gitq--flat-parse-where tokens current-fields)))
+         (list (car r) (cdr r) current-fields)))
       ("grep"
+       (gitq--require-field current-fields "sha" "grep")
        (let* ((pat-tok (pop tokens))
               (regex   (string-prefix-p "/" pat-tok))
               (pattern (if regex (gitq--unregex pat-tok) (gitq--unquote pat-tok))))
          ;; Inline "path" qualifier removed in flat mode — use a separate path step.
-         (cons (list :type 'grep :pattern pattern :regex regex :path-filter nil)
-               tokens)))
+         (list (list :type 'grep :pattern pattern :regex regex :path-filter nil)
+               tokens gitq--line-fields)))
       ("pickaxe"
+       (gitq--require-field current-fields "sha" "pickaxe")
        (let* ((pat-tok (pop tokens))
               (regex   (or (string-prefix-p "/" pat-tok)
                            (equal (car tokens) "regex")))
@@ -1114,9 +1231,10 @@ Returns (node . remaining)."
                            (gitq--unregex pat-tok)
                          (gitq--unquote pat-tok))))
          (when (equal (car tokens) "regex") (pop tokens))
-         (cons (list :type 'pickaxe :pattern pattern :regex regex) tokens)))
+         (list (list :type 'pickaxe :pattern pattern :regex regex) tokens current-fields)))
       ("path"
-       (cons (list :type 'path :pattern (gitq--unquote (pop tokens))) tokens))
+       (gitq--require-field current-fields "path" "path")
+       (list (list :type 'path :pattern (gitq--unquote (pop tokens))) tokens current-fields))
       ("pick"
        ;; Driven by field-list membership (plus comma), not the generic
        ;; step-keyword boundary check: `path' is both a reserved step
@@ -1126,24 +1244,26 @@ Returns (node . remaining)."
        ;; though it is also a step keyword everywhere else.
        (let (fields)
          (while (and tokens (or (equal (car tokens) ",")
-                                (member (car tokens) gitq--field-names)))
+                                (member (car tokens) current-fields)))
            (let ((tok (pop tokens)))
              (unless (equal tok ",")
-               (push (intern tok) fields))))
-         (cons (list :type 'pick :fields (nreverse fields)) tokens)))
+               (push tok fields))))
+         (setq fields (nreverse fields))
+         (list (list :type 'pick :fields (mapcar #'intern fields)) tokens fields)))
       ("take"
-       (cons (list :type 'take :n (gitq--flat-parse-count (pop tokens) "take")) tokens))
+       (list (list :type 'take :n (gitq--flat-parse-count (pop tokens) "take")) tokens current-fields))
       ("skip"
-       (cons (list :type 'skip :n (gitq--flat-parse-count (pop tokens) "skip")) tokens))
-      ("first" (cons (list :type 'first) tokens))
-      ("last"  (cons (list :type 'last)  tokens))
+       (list (list :type 'skip :n (gitq--flat-parse-count (pop tokens) "skip")) tokens current-fields))
+      ("first" (list (list :type 'first) tokens current-fields))
+      ("last"  (list (list :type 'last)  tokens current-fields))
       ("sort"
        (let* ((f    (pop tokens))
               (neg  (string-prefix-p "-" f))
               (name (if neg (substring f 1) f)))
-         (unless (member name gitq--field-names)
-           (error "gitq: unknown field '%s' after 'sort'" name))
-         (cons (list :type 'sort :field (intern name) :desc neg) tokens)))
+         (unless (member name current-fields)
+           (error "gitq: field '%s' not valid here after 'sort' (current frame has: %s)"
+                  name (string-join current-fields ", ")))
+         (list (list :type 'sort :field (intern name) :desc neg) tokens current-fields)))
       (_ (error "gitq: unknown step keyword '%s'" kw)))))
 
 (defun gitq--flat-parse-terminal (tok tokens)
@@ -1161,12 +1281,13 @@ Returns (node . remaining)."
 Uses whitespace as the stage separator with /terminal syntax.
 No pipe character required."
   (let* ((tokens (gitq--tokenize-flat (string-trim pipeline-str)))
-         nodes)
+         nodes fields)
     (unless tokens (error "gitq: empty pipeline"))
     ;; Parse source (first stage)
     (let* ((result (gitq--flat-parse-source tokens)))
       (push (car result) nodes)
-      (setq tokens (cdr result)))
+      (setq tokens (cdr result))
+      (setq fields (alist-get (plist-get (car result) :source) gitq--source-fields)))
     ;; Parse steps and terminal
     (while tokens
       (let ((tok (car tokens)))
@@ -1176,9 +1297,10 @@ No pipe character required."
             (push (car result) nodes)
             (setq tokens nil)))     ; terminal is always last
          ((gitq--flat-step-p tok)
-          (let* ((result (gitq--flat-parse-step tokens)))
-            (push (car result) nodes)
-            (setq tokens (cdr result))))
+          (let* ((result (gitq--flat-parse-step tokens fields)))
+            (push (nth 0 result) nodes)
+            (setq tokens (nth 1 result))
+            (setq fields (nth 2 result))))
          (t
           (error "gitq: expected step keyword or /terminal, got '%s'" tok)))))
     (nreverse nodes)))
@@ -1363,6 +1485,60 @@ actively misleading)."
    ((member field '("name" "branch"))
     (gitq--complete-refs))))
 
+(defun gitq--infer-fields-for-ctx (ctx)
+  "Return the field-set active after fully-typed tokens CTX.
+Replays the real pipeline parser (`gitq--flat-parse-source' then
+`gitq--flat-parse-step' stage by stage) instead of re-implementing its
+stage-skipping logic a second time, so the strict parser and completion
+can never silently drift apart. CTX is typically a prefix of a full
+pipeline — possibly ending mid-stage (e.g. right after `via' with no
+morphism token yet) — so each stage is parsed inside its own
+`condition-case': the first stage that can't be parsed from what's
+typed so far just stops the walk there, returning the last
+successfully-computed field-set instead of erroring out entirely."
+  (condition-case nil
+      (let* ((tokens ctx)
+             (result (gitq--flat-parse-source tokens))
+             (fields (alist-get (plist-get (car result) :source) gitq--source-fields)))
+        (setq tokens (cdr result))
+        (while tokens
+          (cond
+           ((gitq--flat-terminal-p (car tokens)) (setq tokens nil))
+           ((gitq--flat-step-p (car tokens))
+            (condition-case nil
+                (let ((r (gitq--flat-parse-step tokens fields)))
+                  (setq tokens (nth 1 r))
+                  (setq fields (nth 2 r)))
+              (error (setq tokens nil))))
+           (t (setq tokens nil))))
+        fields)
+    (error gitq--commit-fields)))
+
+(defun gitq--complete--current-type-fields (ctx)
+  "Return the field-set valid to offer as `where'/`sort'/`pick' field
+candidates at the end of CTX — the field-set flowing into whichever of
+those three stages encloses the current position (found via
+`gitq--complete--enclosing-step'), not the fields after it. `pick'
+matters here: with zero fields picked so far, its OWN output field-set
+is empty, so candidates must come from what's valid to pick *from*,
+computed by inferring fields only up to (not including) the enclosing
+stage keyword itself."
+  (let* ((stage (gitq--complete--enclosing-step ctx))
+         (idx   (and stage (cl-position stage ctx :test #'equal :from-end t))))
+    (gitq--infer-fields-for-ctx (if idx (seq-take ctx idx) ctx))))
+
+(defun gitq--morphism-requires (path)
+  "Return the field the `via' morphism PATH (a `gitq--complete-morphisms'
+candidate string) needs present in the current field-set, or nil if
+PATH is unknown.  Reuses `gitq--flat-parse-via' (fed just PATH, with no
+domain check of its own) to extract the morphism symbol, then looks it
+up in `gitq--morphism-signatures' — the same table `gitq--flat-parse-step'
+enforces against at parse time, so completion can never offer a
+morphism the parser would then reject."
+  (let* ((node (ignore-errors (car (gitq--flat-parse-via (list path)))))
+         (morphism (and node (plist-get node :morphism))))
+    (car (alist-get morphism gitq--morphism-signatures))))
+
 (defun gitq--complete-candidates (input)
   "Return a list of completion candidates for the pipeline string INPUT.
 INPUT is everything typed so far; completions extend the last partial word."
@@ -1389,9 +1565,18 @@ INPUT is everything typed so far; completions extend the last partial word."
      ((and (equal last-ctx "in") (equal prev-ctx "commits"))
       (gitq--complete-refs))
 
-     ;; After "via" → morphisms
+     ;; After "via" → morphisms valid for the frame type flowing in here
+     ;; (e.g. `.tree'/`.parent' never show up after a `branches'/`refs'
+     ;; source, since ref frames carry no `:tree'/`:parents-count' —
+     ;; the same domain check `gitq--flat-parse-step' enforces at parse
+     ;; time, so completion can't offer something the parser would then
+     ;; reject).
      ((equal last-ctx "via")
-      gitq--complete-morphisms)
+      (let ((fields (gitq--infer-fields-for-ctx (butlast ctx))))
+        (seq-filter (lambda (m)
+                      (let ((req (gitq--morphism-requires m)))
+                        (or (null req) (member req fields))))
+                    gitq--complete-morphisms)))
 
      ;; After ".diff" (the one morphism with an optional trailing REF
      ;; argument) → offer refs, but also let the user skip straight to
@@ -1400,26 +1585,36 @@ INPUT is everything typed so far; completions extend the last partial word."
       (append (gitq--complete-refs) gitq--flat-step-keywords gitq--complete-terminals))
 
      ;; After "where" or "," (start of another condition) → field names
+     ;; valid for the frame type flowing into this `where' (not the
+     ;; flat global union of every field on every frame type).
      ((or (equal last-ctx "where") (equal last-ctx ","))
-      gitq--field-names)
+      (gitq--complete--current-type-fields ctx))
 
      ;; After a field that is part of a `where' clause → where
      ;; operators.  `sort'/`pick' fields never take one; `path' is also
      ;; a field name but is excluded from THIS check anyway, since the
      ;; enclosing-step guard already requires "where" specifically.
-     ((and last-ctx (member last-ctx gitq--field-names)
-           (equal (gitq--complete--enclosing-step ctx) "where"))
+     ;; Validated against the current frame type's fields, not the flat
+     ;; global list, so a hand-typed cross-type field (e.g. `name' after
+     ;; `commits where') doesn't get offered where-operators at all.
+     ((and last-ctx
+           (equal (gitq--complete--enclosing-step ctx) "where")
+           (member last-ctx (gitq--complete--current-type-fields ctx)))
       gitq--complete-where-operators)
 
-     ;; After "sort" → field names with optional "-" negation prefix
+     ;; After "sort" → field names (current frame type) with optional
+     ;; "-" negation prefix
      ((equal last-ctx "sort")
-      (append gitq--field-names
-              (mapcar (lambda (f) (concat "-" f)) gitq--field-names)))
+      (let ((fields (gitq--complete--current-type-fields ctx)))
+        (append fields (mapcar (lambda (f) (concat "-" f)) fields))))
 
-     ;; After "pick" or pick-comma → field names
+     ;; After "pick" or pick-comma → field names valid for the frame
+     ;; type flowing into `pick' (computed from what's typed *before*
+     ;; `pick', since `pick' with nothing chosen yet has an empty output
+     ;; field-set of its own).
      ((or (equal last-ctx "pick")
           (and (equal last-ctx ",") (member "pick" ctx)))
-      gitq--field-names)
+      (gitq--complete--current-type-fields ctx))
 
      ;; After a where-operator → dynamic values (authors, dates, paths,
      ;; refs, sha's, ...) — see `gitq--complete-where-values'.

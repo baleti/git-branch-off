@@ -142,11 +142,14 @@
     (should-not (gitq--flat-terminal-p kw))))
 
 (ert-deftest gitq-flat-test/p3-step-keyword-starts-stage-after-source ()
-  "P3: every step keyword immediately after a source starts a step node."
+  "P3: every step keyword immediately after a source starts a step node.
+Uses `blobs' (not `commits') for the `path' iteration specifically,
+since `path' needs a `:path' field and commit frames don't carry one."
   (dolist (kw (remove "first" (remove "last" gitq-flat-test--all-step-keywords)))
     ;; Provide a dummy argument so the step parser doesn't fail on missing args.
     ;; We just check that the second node is the expected step type.
-    (let* ((dummy (pcase kw
+    (let* ((source (if (equal kw "path") "blobs" "commits"))
+           (dummy (pcase kw
                     ("take"     "1")
                     ("skip"     "0")
                     ("sort"     "date")
@@ -157,7 +160,7 @@
                     ("pick"     "sha")
                     ("where"    "sha")
                     (_          "")))
-           (pipeline (string-trim (format "commits %s %s" kw dummy)))
+           (pipeline (string-trim (format "%s %s %s" source kw dummy)))
            (nodes    (gitq--parse-flat pipeline)))
       (should (= (length nodes) 2) )
       (should (eq (plist-get (car nodes) :type) 'source))
@@ -172,8 +175,8 @@
 
 (ert-deftest gitq-flat-test/p3-step-keyword-after-step ()
   "P3: every step keyword after another step starts a new step node."
-  ;; where modified ... take 5 — take starts a new step after where
-  (let ((nodes (gitq--parse-flat "commits where modified take 3")))
+  ;; where author ... take 5 — take starts a new step after where
+  (let ((nodes (gitq--parse-flat "commits where author take 3")))
     (should (= (length nodes) 3))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'where))
@@ -254,8 +257,8 @@
 ;; The flat parser treats step keywords as boundaries so FLAG is always a bare flag.
 
 (ert-deftest gitq-flat-test/p5-bare-flag-before-take ()
-  "P5: 'where modified take 5' — modified is a bare flag, take starts next step."
-  (let* ((nodes (gitq--parse-flat "commits where modified take 5"))
+  "P5: 'where author take 5' — author is a bare flag, take starts next step."
+  (let* ((nodes (gitq--parse-flat "commits where author take 5"))
          (where (cadr nodes))
          (take  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
@@ -266,13 +269,17 @@
     (should (= (plist-get take :n) 5))))
 
 (ert-deftest gitq-flat-test/p5-bare-flags-all-step-keywords ()
-  "P5: 'where flag KEYWORD …' correctly identifies bare flag for every step keyword."
+  "P5: 'where flag KEYWORD …' correctly identifies bare flag for every step keyword.
+Uses `blobs' (not `commits') for the `path' iteration specifically,
+since `path' needs a `:path' field and commit frames don't carry one —
+every other keyword's dummy arg is valid against commit fields."
   (dolist (kw (remove "first" (remove "last" gitq-flat-test--all-step-keywords)))
-    (let* ((arg (pcase kw
+    (let* ((source (if (equal kw "path") "blobs" "commits"))
+           (arg (pcase kw
                   ("take" "1") ("skip" "0") ("sort" "date")
                   ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
                   ("path" "\"*\"") ("pick" "sha") ("where" "sha") (_ "")))
-           (pipeline (string-trim (format "commits where modified %s %s" kw arg)))
+           (pipeline (string-trim (format "%s where sha %s %s" source kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (where    (cadr nodes))
            (cond1    (car (plist-get where :conditions))))
@@ -281,8 +288,8 @@
               ))))
 
 (ert-deftest gitq-flat-test/p5-multi-condition-bare-flag ()
-  "P5: 'where modified, staged take 3' — both bare flags, then take."
-  (let* ((nodes  (gitq--parse-flat "commits where modified, staged take 3"))
+  "P5: 'where author, message take 3' — both bare flags, then take."
+  (let* ((nodes  (gitq--parse-flat "commits where author, message take 3"))
          (where  (cadr nodes))
          (conds  (plist-get where :conditions))
          (take   (nth 2 nodes)))
@@ -293,8 +300,8 @@
     (should (= (plist-get take :n) 3))))
 
 (ert-deftest gitq-flat-test/p5-bare-flag-before-terminal ()
-  "P5: 'where modified /show' — modified is a bare flag, /show is terminal."
-  (let* ((nodes (gitq--parse-flat "commits where modified /show"))
+  "P5: 'where author /show' — author is a bare flag, /show is terminal."
+  (let* ((nodes (gitq--parse-flat "commits where author /show"))
          (where (cadr nodes))
          (term  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
@@ -321,12 +328,16 @@
     (should (= (plist-get take :n) 5))))
 
 (ert-deftest gitq-flat-test/p6-range-terminates-at-each-step-keyword ()
-  "P6: 'commits in REF KEYWORD ...' — every step keyword ends the range."
-  (dolist (kw (remove "first" (remove "last" gitq-flat-test--all-step-keywords)))
+  "P6: 'commits in REF KEYWORD ...' — every step keyword ends the range.
+`path' is excluded from this loop (commits are commit-shaped, no
+`:path' field, so `path' can never immediately follow a bare `commits
+in REF' regardless of the range-termination behavior under test here)
+and covered separately by `p6-range-then-diff-then-path' below."
+  (dolist (kw (remove "path" (remove "first" (remove "last" gitq-flat-test--all-step-keywords))))
     (let* ((arg (pcase kw
                   ("take" "1") ("skip" "0") ("sort" "date")
                   ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
-                  ("path" "\"*\"") ("pick" "sha") ("where" "sha") (_ "")))
+                  ("pick" "sha") ("where" "sha") (_ "")))
            (pipeline (string-trim (format "commits in main %s %s" kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (src      (car nodes)))
@@ -334,6 +345,15 @@
       (should (equal (plist-get src :range) "main"))
       ;; Second node should be the step
       (should (eq (plist-get (cadr nodes) :type) (intern kw))))))
+
+(ert-deftest gitq-flat-test/p6-range-then-diff-then-path ()
+  "P6: range parsing plus the `path' step, once the frame is diff-shaped
+(via `.diff', which carries `:path') rather than immediately after a
+bare commit-shaped source."
+  (let* ((nodes (gitq--parse-flat "commits in main via .diff path \"*.ts\""))
+         (src   (car nodes)))
+    (should (equal (plist-get src :range) "main"))
+    (should (eq (plist-get (nth 2 nodes) :type) 'path))))
 
 (ert-deftest gitq-flat-test/p6-range-multiple-tokens ()
   "P6: multi-token ranges like 'main..HEAD~3' parse as one range."
@@ -426,9 +446,9 @@
 
 (ert-deftest gitq-flat-test/cross-former-terminal-in-where-multi-step ()
   "Former terminal as where value, followed by a step keyword."
-  ;; 'commits where branch == main sort date /show'
+  ;; 'commits where author == main sort date /show'
   ;; 'main' is not a keyword; sort starts step; /show is terminal.
-  (let* ((nodes (gitq--parse-flat "commits where branch == main sort date /show"))
+  (let* ((nodes (gitq--parse-flat "commits where author == main sort date /show"))
          (where (cadr nodes))
          (sort  (nth 2 nodes))
          (term  (nth 3 nodes))
@@ -554,45 +574,50 @@
 (ert-deftest gitq-flat-test/field-unknown-errors-after-sort ()
   (should-error (gitq--parse-flat "commits sort notarealfield") :type 'error))
 
+;; These use `blobs' rather than `commits' as the source: `path' is only
+;; a real field on blob/diff/hunk/line frames (commit frames have no
+;; `:path' at all), so exercising the field-vs-step-keyword collision
+;; needs a source that structurally has the field to begin with.
+
 (ert-deftest gitq-flat-test/field-path-as-where-condition ()
   "`path' resolves as a field when used in a where condition."
-  (let* ((nodes (gitq--parse-flat "commits where path == \"src/x.ts\""))
+  (let* ((nodes (gitq--parse-flat "blobs where path == \"src/x.ts\""))
          (cond1 (car (plist-get (cadr nodes) :conditions))))
     (should (eq (plist-get cond1 :field) 'path))
     (should (equal (plist-get cond1 :value) "src/x.ts"))))
 
 (ert-deftest gitq-flat-test/field-path-chained-without-comma ()
   "`path' resolves as a second, comma-less chained field, not a new stage."
-  (let* ((nodes (gitq--parse-flat "commits where modified path == \"src/x.ts\""))
+  (let* ((nodes (gitq--parse-flat "blobs where sha path == \"src/x.ts\""))
          (where (cadr nodes))
          (conds (plist-get where :conditions)))
     (should (= (length nodes) 2))              ; source, where (no terminal)
     (should (= (length conds) 2))
-    (should (eq (plist-get (nth 0 conds) :field) 'modified))
+    (should (eq (plist-get (nth 0 conds) :field) 'sha))
     (should (eq (plist-get (nth 1 conds) :field) 'path))))
 
 (ert-deftest gitq-flat-test/field-path-in-pick-comma-list ()
   "`path' resolves as a field inside `pick', not as a boundary ending the list."
-  (let* ((nodes (gitq--parse-flat "commits pick path, author"))
+  (let* ((nodes (gitq--parse-flat "blobs pick path, mode"))
          (pick  (cadr nodes)))
     (should (= (length nodes) 2))
-    (should (equal (plist-get pick :fields) '(path author)))))
+    (should (equal (plist-get pick :fields) '(path mode)))))
 
 (ert-deftest gitq-flat-test/field-path-in-pick-comma-less ()
   "`path' resolves as a field inside `pick' even without a comma."
-  (let* ((nodes (gitq--parse-flat "commits pick path author"))
+  (let* ((nodes (gitq--parse-flat "blobs pick path mode"))
          (pick  (cadr nodes)))
-    (should (equal (plist-get pick :fields) '(path author)))))
+    (should (equal (plist-get pick :fields) '(path mode)))))
 
 (ert-deftest gitq-flat-test/field-path-still-works-as-standalone-step ()
   "`path' is still the standalone glob-filter step when it starts a fresh stage."
-  (let* ((nodes (gitq--parse-flat "commits path \"*.ts\"")))
+  (let* ((nodes (gitq--parse-flat "blobs path \"*.ts\"")))
     (should (eq (plist-get (cadr nodes) :type) 'path))
     (should (equal (plist-get (cadr nodes) :pattern) "*.ts"))))
 
 (ert-deftest gitq-flat-test/field-path-standalone-step-after-another-step ()
   "`path' as a standalone step still works right after a prior, unrelated step."
-  (let* ((nodes (gitq--parse-flat "commits take 5 path \"*.ts\"")))
+  (let* ((nodes (gitq--parse-flat "blobs take 5 path \"*.ts\"")))
     (should (eq (plist-get (nth 1 nodes) :type) 'take))
     (should (eq (plist-get (nth 2 nodes) :type) 'path))))
 

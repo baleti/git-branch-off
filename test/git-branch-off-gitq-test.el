@@ -170,8 +170,10 @@
     (should (eq (plist-get via :morphism) 'history))))
 
 (ert-deftest gitq-test--parse-via/commit ()
-  (let* ((nodes (gitq--parse-flat "blobs via .commit /show"))
-         (via   (nth 1 nodes)))
+  "`.commit' resolves via `:commit-sha', which only hunk/line frames
+carry (not blobs) -- reach a line frame first via `grep'."
+  (let* ((nodes (gitq--parse-flat "commits grep \"x\" via .commit /show"))
+         (via   (nth 2 nodes)))
     (should (eq (plist-get via :morphism) 'commit))))
 
 (ert-deftest gitq-test--parse-via/unknown-morphism ()
@@ -339,7 +341,9 @@ grep itself never sets :path-filter."
     (should (plist-get pa :regex))))
 
 (ert-deftest gitq-test--parse-path ()
-  (let* ((nodes (gitq--parse-flat "commits path \"src/auth.ts\" /show"))
+  "The standalone `path' step needs a `:path' field -- `blobs' (not
+`commits', which are commit-shaped and carry no `:path') has one."
+  (let* ((nodes (gitq--parse-flat "blobs path \"src/auth.ts\" /show"))
          (path  (nth 1 nodes)))
     (should (eq (plist-get path :type) 'path))
     (should (equal (plist-get path :pattern) "src/auth.ts"))))
@@ -452,9 +456,15 @@ grep itself never sets :path-filter."
   (should-error (gitq--parse-flat "")))
 
 (ert-deftest gitq-test--parse/complex-pipeline ()
-  "Example 3 from spec: commits introducing a string via pickaxe."
+  "Example 3 from spec: commits introducing a string via pickaxe.
+Picks `sha, path, parent-sha' rather than the original spec wording's
+`sha, date, author, path' -- after `via .diff' the frame is diff-shaped
+and diff frames never carried `:date'/`:author' (only commits do), so
+that combination could never actually resolve either field; this is
+exactly the class of bug the field-type system now catches at parse
+time instead of silently picking nil for them."
   (let* ((nodes (gitq--parse-flat
-                 "commits via .diff pickaxe \"SecretKey\" pick sha, date, author, path"))
+                 "commits via .diff pickaxe \"SecretKey\" pick sha, path, parent-sha"))
          (src   (nth 0 nodes))
          (via   (nth 1 nodes))
          (pa    (nth 2 nodes))
@@ -462,7 +472,7 @@ grep itself never sets :path-filter."
     (should (eq (plist-get src :source) 'commits))
     (should (eq (plist-get via :morphism) 'diff))
     (should (eq (plist-get pa :type) 'pickaxe))
-    (should (equal (plist-get pick :fields) '(sha date author path)))))
+    (should (equal (plist-get pick :fields) '(sha path parent-sha)))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: gitq--parse-commit-line
@@ -1436,6 +1446,109 @@ fully-quoted, multi-word value case."
   (should (equal (gitq--parse-flat "commits take 5")
                  '((:type source :source commits :range nil)
                    (:type take :n 5)))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: structural field-type checking
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;
+;; `where'/`sort'/`pick'/`path'/`via' are validated against the field-set of
+;; the frame type actually flowing into them at that point in the pipeline
+;; (`gitq--source-fields'/`gitq--morphism-signatures', threaded through
+;; `gitq--parse-flat' as `current-fields'), not the single flat global union
+;; in `gitq--field-names'. A field valid on some other frame type is now a
+;; parse-time error naming exactly which fields the current frame has,
+;; instead of a silently-empty result at run time.
+
+(ert-deftest gitq-test--type/where-field-invalid-for-source-errors ()
+  "`name'/`branch' only exist on ref/worktree frames -- referencing them
+after a `commits' source is a parse-time error, not a silent empty
+result (which is what happened before: commit frames have no `:name',
+so the condition always evaluated false)."
+  (should-error (gitq--parse-flat "commits where name == main"))
+  (should-error (gitq--parse-flat "commits where branch == main")))
+
+(ert-deftest gitq-test--type/where-field-valid-for-matching-source-works ()
+  (should (gitq--parse-flat "branches where name == main"))
+  (should (gitq--parse-flat "worktrees where branch == main")))
+
+(ert-deftest gitq-test--type/sort-field-invalid-for-source-errors ()
+  (should-error (gitq--parse-flat "commits sort name"))
+  (should (gitq--parse-flat "branches sort name")))
+
+(ert-deftest gitq-test--type/pick-field-invalid-for-source-errors ()
+  (should-error (gitq--parse-flat "commits pick name")))
+
+(ert-deftest gitq-test--type/pick-narrows-fields-for-later-steps ()
+  "After `pick', only the picked fields remain valid -- picking narrows
+the field-set for anything chained after it, same as any other
+field-shape-changing step."
+  (should-error (gitq--parse-flat "commits pick sha where author == \"x\"")))
+
+(ert-deftest gitq-test--type/via-domain-error-names-required-field ()
+  "`.tree' needs `:tree', which only commit frames carry -- applying it
+after a `branches' source (ref frames have no `:tree') is a parse-time
+error, not the old silent empty result (`gitq--exec-via''s `tree' case
+read a nil `:tree' and produced nothing)."
+  (should-error (gitq--parse-flat "branches via .tree")))
+
+(ert-deftest gitq-test--type/via-domain-valid-for-matching-source-works ()
+  (should (gitq--parse-flat "commits via .tree"))
+  (should (gitq--parse-flat "commits via .diff"))
+  (should (gitq--parse-flat "branches via .diff")) ; ref frames do have :sha
+  (should (gitq--parse-flat "commits via .diff.hunks via .commit")))
+
+(ert-deftest gitq-test--type/grep-after-hunk-errors ()
+  "hunk frames (from `.diff.hunks') have no `:sha' -- `grep' needs one.
+Before this check, this used to crash deep inside `call-process' with
+a literal nil argument instead of failing at parse time with a clear
+message."
+  (should-error (gitq--parse-flat "commits via .diff.hunks grep \"x\"")))
+
+(ert-deftest gitq-test--type/pickaxe-after-hunk-errors ()
+  (should-error (gitq--parse-flat "commits via .diff.hunks pickaxe \"x\"")))
+
+(ert-deftest gitq-test--type/path-step-requires-path-field ()
+  (should-error (gitq--parse-flat "commits path \"*.ts\""))
+  (should (gitq--parse-flat "blobs path \"*.ts\""))
+  (should (gitq--parse-flat "commits via .diff path \"*.ts\"")))
+
+(ert-deftest gitq-test--type/grep-output-is-line-shaped ()
+  "`grep' produces line frames -- fields valid afterward are line
+fields (path/line-number/content/commit-sha/sha), not the source's own
+original fields."
+  (should (gitq--parse-flat "commits grep \"x\" where line-number > 1"))
+  (should-error (gitq--parse-flat "commits grep \"x\" where author == \"a\"")))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: gitq--complete-candidates — type-narrowed field/morphism candidates
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--complete-candidates/where-fields-narrowed-by-source ()
+  (let ((commit-cands  (gitq--complete-candidates "commits where "))
+        (branch-cands  (gitq--complete-candidates "branches where ")))
+    (should (member "author" commit-cands))
+    (should-not (member "name" commit-cands))
+    (should-not (member "reftype" commit-cands))
+    (should (member "name" branch-cands))
+    (should (member "reftype" branch-cands))
+    (should-not (member "author" branch-cands))))
+
+(ert-deftest gitq-test--complete-candidates/pick-fields-narrowed-after-via-diff ()
+  (let ((cands (gitq--complete-candidates "commits via .diff pick ")))
+    (should (member "path" cands))
+    (should (member "parent-sha" cands))
+    (should-not (member "author" cands))
+    (should-not (member "message" cands))))
+
+(ert-deftest gitq-test--complete-candidates/via-morphisms-narrowed-by-source ()
+  "`.tree'/`.parent*' (need `:tree'/`:parents-count', commit-only) are
+excluded after a `branches' source; `.tree.blobs' (just needs `:sha',
+which ref frames have) is still offered."
+  (let ((cands (gitq--complete-candidates "branches via ")))
+    (should-not (member ".tree" cands))
+    (should-not (member ".parent*" cands))
+    (should (member ".tree.blobs" cands))
+    (should (member ".diff" cands))))
 
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here
