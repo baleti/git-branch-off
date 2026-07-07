@@ -610,15 +610,17 @@ When PLUS is non-nil, exclude the start frames themselves (`.parent+')."
     (current-buffer)))
 
 (defun gitq--display (frames pipeline-str)
-  "Show FRAMES in the *gitq* results buffer, selecting its window."
-  (pop-to-buffer (gitq--render frames pipeline-str)))
+  "Show FRAMES in the *gitq* results buffer, taking over the whole frame
+and selecting its window."
+  (pop-to-buffer (gitq--render frames pipeline-str) '(display-buffer-full-frame)))
 
 (defun gitq--preview-display (frames pipeline-str)
   "Show FRAMES in the *gitq* results buffer without selecting its window.
 Used to preview a pipeline still being typed in the minibuffer: results
-appear right away, above the minibuffer, without taking focus away
-from typing."
-  (display-buffer (gitq--render frames pipeline-str)))
+appear right away, above the minibuffer, taking over the whole frame
+\(display-buffer-full-frame\) rather than splitting it in half, without
+taking focus away from typing."
+  (display-buffer (gitq--render frames pipeline-str) '(display-buffer-full-frame)))
 
 (defun gitq-results-visit ()
   "Visit the git object at point in the *gitq* buffer."
