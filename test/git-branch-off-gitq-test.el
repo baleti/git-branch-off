@@ -1307,5 +1307,127 @@ skip straight to a step or terminal."
     (gitq-test--commit "f.txt" "x\n" "init")
     (should (member "main" (gitq--complete-candidates "commits in ")))))
 
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: pipe-syntax strict trailing-token errors
+;;;
+;;; Every pipe-syntax stage used to silently discard tokens it didn't
+;;; consume. Worst case: "commits where .date == ..." with no "|" before
+;;; "where" parsed the whole where-clause away as unconsumed leftover of
+;;; the "commits" source, executing as a plain, unfiltered "commits" --
+;;; no error, just silently wrong results. These tests assert that this
+;;; whole class of mistake now raises a clear error instead.
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--parse/missing-pipe-before-where-errors ()
+  "The exact original bug: forgetting '|' before `where' must error,
+not silently drop the whole where-clause."
+  (should-error (gitq--parse "commits where .date == 2025")))
+
+(ert-deftest gitq-test--parse/unquoted-multiword-value-errors ()
+  "Even with the pipe present, an unquoted value with spaces leaves
+leftover tokens and must error rather than silently truncate."
+  (should-error (gitq--parse "commits | where .date == 2025-12-05 09:30:00 +0400")))
+
+(ert-deftest gitq-test--parse/unquoted-multiword-value-quoted-works ()
+  "The correct, quoted form must still parse fine."
+  (let ((nodes (gitq--parse "commits | where .date == \"2025-12-05 09:30:00 +0400\"")))
+    (should (equal (plist-get (car (plist-get (nth 1 nodes) :conditions)) :value)
+                   "2025-12-05 09:30:00 +0400"))))
+
+(ert-deftest gitq-test--parse/where-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | where .author == \"Alice\" extra")))
+
+(ert-deftest gitq-test--parse/pick-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | pick .sha not-a-field")))
+
+(ert-deftest gitq-test--parse/via-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | via .parent extra")))
+
+(ert-deftest gitq-test--parse/via-diff-still-allows-optional-ref ()
+  (let ((nodes (gitq--parse "commits | via .diff main")))
+    (should (equal (plist-get (nth 1 nodes) :ref) "main"))))
+
+(ert-deftest gitq-test--parse/grep-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | grep \"foo\" extra")))
+
+(ert-deftest gitq-test--parse/grep-path-filter-still-works ()
+  (let ((nodes (gitq--parse "commits | grep \"foo\" path \"*.ts\"")))
+    (should (equal (plist-get (nth 1 nodes) :path-filter) "*.ts"))))
+
+(ert-deftest gitq-test--parse/pickaxe-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | pickaxe \"foo\" extra")))
+
+(ert-deftest gitq-test--parse/pickaxe-regex-flag-still-works ()
+  (let ((nodes (gitq--parse "commits | pickaxe \"foo\" regex")))
+    (should (plist-get (nth 1 nodes) :regex))))
+
+(ert-deftest gitq-test--parse/source-trailing-garbage-errors ()
+  (should-error (gitq--parse "branches extra"))
+  (should-error (gitq--parse "some-branch-name extra")))
+
+(ert-deftest gitq-test--parse/take-skip-sort-path-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | take 5 extra"))
+  (should-error (gitq--parse "commits | skip 5 extra"))
+  (should-error (gitq--parse "commits | sort .date extra"))
+  (should-error (gitq--parse "commits | path \"*.ts\" extra"))
+  (should-error (gitq--parse "commits | first extra"))
+  (should-error (gitq--parse "commits | last extra")))
+
+(ert-deftest gitq-test--parse/terminal-trailing-garbage-errors ()
+  (should-error (gitq--parse "commits | show extra"))
+  (should-error (gitq--parse "commits | count extra")))
+
+(ert-deftest gitq-test--parse/terminal-branch-off-with-worktree-still-works ()
+  (let ((nodes (gitq--parse "commits | branch-off \"name\" worktree \"/tmp/wt\"")))
+    (should (equal (plist-get (car (last nodes)) :name) "name"))
+    (should (equal (plist-get (car (last nodes)) :worktree) "/tmp/wt"))))
+
+(ert-deftest gitq-test--parse/terminal-amend-no-edit-still-works ()
+  (let ((nodes (gitq--parse "commits | amend no-edit")))
+    (should (plist-get (car (last nodes)) :no-edit))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: tokenizer robustness against unterminated quotes/regexes
+;;;
+;;; A still-being-typed, not-yet-closed quote or /regex/ used to signal
+;;; args-out-of-range instead of gracefully treating the rest of the
+;;; string as its content -- a real crash risk since completion re-runs
+;;; the tokenizer on every keystroke while the user is mid-value.
+;;; ─────────────────────────────────────────────────────────────────────────────
+
+(ert-deftest gitq-test--tokenize-flat/unterminated-quote-does-not-error ()
+  (should (equal (gitq--tokenize-flat "where .author == \"Ali")
+                 '("where" ".author" "==" "\"Ali"))))
+
+(ert-deftest gitq-test--tokenize/unterminated-quote-does-not-error ()
+  (should (equal (gitq--tokenize "where .author == \"Ali")
+                 '("where" ".author" "==" "\"Ali"))))
+
+(ert-deftest gitq-test--tokenize/unterminated-regex-does-not-error ()
+  (should (equal (gitq--tokenize "grep /foo") '("grep" "/foo"))))
+
+(ert-deftest gitq-test--split-pipeline/unterminated-quote-does-not-error ()
+  (should (equal (gitq--split-pipeline "commits | where .author == \"Ali")
+                 '("commits" "where .author == \"Ali"))))
+
+(ert-deftest gitq-test--split-pipeline/unterminated-regex-does-not-error ()
+  (should (equal (gitq--split-pipeline "commits | grep /foo")
+                 '("commits" "grep /foo"))))
+
+(ert-deftest gitq-test--current-token/unterminated-quote-does-not-error ()
+  (should (equal (gitq--current-token "commits where .date == \"202") "\"202")))
+
+(ert-deftest gitq-test--completion-table/unterminated-quote-does-not-error ()
+  "Regression test for the exact crash Vertico would hit: re-running
+completion on every keystroke while a quoted value is still open."
+  (should (equal (all-completions "commits where .date == \"202" #'gitq--completion-table)
+                 nil)))
+
+(ert-deftest gitq-test--tokenize-flat/terminated-quote-still-works ()
+  "Sanity check: fixing the unterminated case must not break the normal,
+fully-quoted, multi-word value case."
+  (should (equal (gitq--tokenize-flat "where .author == \"Alice Smith\"")
+                 '("where" ".author" "==" "\"Alice Smith\""))))
+
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here

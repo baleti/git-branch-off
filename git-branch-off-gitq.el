@@ -46,13 +46,19 @@
             (while (and (< i len) (not (eq (aref str i) ?\")))
               (when (eq (aref str i) ?\\) (setq i (1+ i)))
               (setq i (1+ i)))
-            (setq i (1+ i) cur (concat cur (substring str s i)))))
+            ;; Only consume the closing quote if one was actually found --
+            ;; an unterminated quote (e.g. still being typed) must not
+            ;; push `i' past the end of `str', or `substring' below signals
+            ;; args-out-of-range instead of just taking the rest as-is.
+            (when (< i len) (setq i (1+ i)))
+            (setq cur (concat cur (substring str s i)))))
          ((eq c ?/)
           (let ((s i))
             (setq i (1+ i))
             (while (and (< i len) (not (eq (aref str i) ?/)))
               (setq i (1+ i)))
-            (setq i (1+ i) cur (concat cur (substring str s i)))))
+            (when (< i len) (setq i (1+ i)))
+            (setq cur (concat cur (substring str s i)))))
          ((eq c ?|)
           (push (string-trim cur) stages)
           (setq cur "" i (1+ i)))
@@ -73,14 +79,16 @@
             (while (and (< i len) (not (eq (aref stage i) ?\")))
               (when (eq (aref stage i) ?\\) (setq i (1+ i)))
               (setq i (1+ i)))
-            (setq i (1+ i))
+            ;; See the matching comment in `gitq--split-pipeline': don't
+            ;; consume a closing quote that was never found.
+            (when (< i len) (setq i (1+ i)))
             (push (substring stage s i) tokens)))
          ((eq c ?/)
           (let ((s i))
             (setq i (1+ i))
             (while (and (< i len) (not (eq (aref stage i) ?/)))
               (setq i (1+ i)))
-            (setq i (1+ i))
+            (when (< i len) (setq i (1+ i)))
             (push (substring stage s i) tokens)))
          ((eq c ?,) (push "," tokens) (setq i (1+ i)))
          ((and (< (1+ i) len)
@@ -146,10 +154,26 @@
 
 ;;; Stage parsers
 
+(defun gitq--expect-no-more (tokens context)
+  "Signal an error if TOKENS is non-nil, naming CONTEXT (e.g. a stage keyword).
+In pipe syntax each stage string is already isolated by splitting on
+`|', so a stage parser should always consume every token it is given.
+Leftover tokens almost always mean either a forgotten `|' before the
+next stage (so that stage's tokens got swallowed as trailing garbage
+here) or a multi-word value that needed double-quotes to be read as one
+token — both used to be silently discarded, which could make a whole
+`where' clause disappear with no error at all and no visible sign
+anything was wrong."
+  (when tokens
+    (error "gitq: unexpected token '%s' after '%s' (missing '|' before the next stage, or quotes around a value?)"
+           (car tokens) context)))
+
 (defun gitq--parse-via (tokens)
   "Parse a `via' stage from TOKENS (the morphism path tokens)."
   (let ((path (car tokens)))
     (unless path (error "gitq: missing morphism after 'via'"))
+    (unless (equal path ".diff")
+      (gitq--expect-no-more (cdr tokens) path))
     (cond
      ((equal path ".parent")          (list :type 'via :morphism 'parent))
      ((equal path ".parent*")         (list :type 'via :morphism 'parent :star t))
@@ -165,10 +189,11 @@
                       (if (equal (match-string 1 path) "Blob") 'blob 'tree))))
      ((equal path ".tree.blobs")      (list :type 'via :morphism 'tree-entries :filter 'blob))
      ((equal path ".tree.subtrees")   (list :type 'via :morphism 'tree-entries :filter 'tree))
-     ((equal path ".diff")            (list :type 'via :morphism 'diff
-                                            :ref (when (and (cdr tokens)
-                                                            (not (string-prefix-p "." (cadr tokens))))
-                                                   (cadr tokens))))
+     ((equal path ".diff")
+      (let ((ref (when (and (cdr tokens) (not (string-prefix-p "." (cadr tokens))))
+                   (cadr tokens))))
+        (gitq--expect-no-more (if ref (cddr tokens) (cdr tokens)) path)
+        (list :type 'via :morphism 'diff :ref ref)))
      ((equal path ".diff.hunks")      (list :type 'via :morphism 'diff-hunks))
      ((equal path ".history")         (list :type 'via :morphism 'history))
      ((equal path ".commit")          (list :type 'via :morphism 'commit))
@@ -204,34 +229,40 @@
                                (t val-tok))))
                 (push (list :field field :op op :value val) conditions))))))
         (when (equal (car remaining) ",") (pop remaining))))
+    (gitq--expect-no-more remaining "where")
     (list :type 'where :conditions (nreverse conditions))))
 
 (defun gitq--parse-pick (tokens)
   "Parse `pick' field list from TOKENS."
   (let (fields)
     (dolist (tok tokens)
-      (when (and (not (equal tok ",")) (string-prefix-p "." tok))
-        (push (intern (substring tok 1)) fields)))
+      (cond
+       ((equal tok ",") nil)
+       ((string-prefix-p "." tok) (push (intern (substring tok 1)) fields))
+       (t (error "gitq: unexpected token '%s' in 'pick' field list" tok))))
     (list :type 'pick :fields (nreverse fields))))
 
 (defun gitq--parse-grep (tokens)
   "Parse a `grep' stage from TOKENS."
-  (let* ((pat-tok  (car tokens))
-         (rest     (cdr tokens))
-         (is-regex (string-prefix-p "/" pat-tok))
-         (pattern  (if is-regex (gitq--unregex pat-tok) (gitq--unquote pat-tok)))
-         (path-filter (when (equal (car rest) "path")
-                        (gitq--unquote (cadr rest)))))
+  (let* ((pat-tok     (car tokens))
+         (rest        (cdr tokens))
+         (is-regex    (string-prefix-p "/" pat-tok))
+         (pattern     (if is-regex (gitq--unregex pat-tok) (gitq--unquote pat-tok)))
+         (has-path    (equal (car rest) "path"))
+         (path-filter (when has-path (gitq--unquote (cadr rest)))))
+    (gitq--expect-no-more (if has-path (cddr rest) rest) "grep")
     (list :type 'grep :pattern pattern :regex is-regex :path-filter path-filter)))
 
 (defun gitq--parse-pickaxe (tokens)
   "Parse a `pickaxe' stage from TOKENS."
-  (let* ((pat-tok  (car tokens))
-         (rest     (cdr tokens))
-         (is-regex (or (string-prefix-p "/" pat-tok) (equal (car rest) "regex")))
-         (pattern  (if (string-prefix-p "/" pat-tok)
-                       (gitq--unregex pat-tok)
-                     (gitq--unquote pat-tok))))
+  (let* ((pat-tok      (car tokens))
+         (rest         (cdr tokens))
+         (has-regex-kw (equal (car rest) "regex"))
+         (is-regex     (or (string-prefix-p "/" pat-tok) has-regex-kw))
+         (pattern      (if (string-prefix-p "/" pat-tok)
+                           (gitq--unregex pat-tok)
+                         (gitq--unquote pat-tok))))
+    (gitq--expect-no-more (if has-regex-kw (cdr rest) rest) "pickaxe")
     (list :type 'pickaxe :pattern pattern :regex is-regex)))
 
 (defconst gitq--terminal-keywords
@@ -242,42 +273,50 @@
 (defun gitq--parse-terminal (kw tokens)
   "Parse terminal operation KW with remaining TOKENS."
   (cond
-   ((equal kw "show")      (list :type 'terminal :op 'show))
-   ((equal kw "copy")      (list :type 'terminal :op 'copy))
-   ((equal kw "insert")    (list :type 'terminal :op 'insert))
-   ((equal kw "count")     (list :type 'terminal :op 'count))
-   ((equal kw "remove")    (list :type 'terminal :op 'remove))
-   ((equal kw "delete")    (list :type 'terminal :op 'delete))
-   ((equal kw "stage")     (list :type 'terminal :op 'stage))
+   ((equal kw "show")      (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'show))
+   ((equal kw "copy")      (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'copy))
+   ((equal kw "insert")    (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'insert))
+   ((equal kw "count")     (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'count))
+   ((equal kw "remove")    (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'remove))
+   ((equal kw "delete")    (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'delete))
+   ((equal kw "stage")     (gitq--expect-no-more tokens kw) (list :type 'terminal :op 'stage))
    ((equal kw "branch-off")
     (let* ((name (when (and tokens (string-prefix-p "\"" (car tokens)))
                    (gitq--unquote (pop tokens))))
            (wt   (when (equal (car tokens) "worktree")
-                   (gitq--unquote (cadr tokens)))))
+                   (pop tokens)
+                   (gitq--unquote (pop tokens)))))
+      (gitq--expect-no-more tokens kw)
       (list :type 'terminal :op 'branch-off :name name :worktree wt)))
    ((equal kw "amend")
     (cond
      ((equal (car tokens) "no-edit")
+      (gitq--expect-no-more (cdr tokens) kw)
       (list :type 'terminal :op 'amend :no-edit t :message nil))
      ((and tokens (string-prefix-p "\"" (car tokens)))
+      (gitq--expect-no-more (cdr tokens) kw)
       (list :type 'terminal :op 'amend :no-edit nil
             :message (gitq--unquote (car tokens))))
-     (t (list :type 'terminal :op 'amend :no-edit nil :message nil))))
+     (t (gitq--expect-no-more tokens kw)
+        (list :type 'terminal :op 'amend :no-edit nil :message nil))))
    ((equal kw "squash")
-    (list :type 'terminal :op 'squash
-          :message (when (and tokens (string-prefix-p "\"" (car tokens)))
-                     (gitq--unquote (car tokens)))))
+    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
+                 (gitq--unquote (car tokens)))))
+      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
+      (list :type 'terminal :op 'squash :message msg)))
    ((equal kw "reword")
-    (list :type 'terminal :op 'reword
-          :message (when (and tokens (string-prefix-p "\"" (car tokens)))
-                     (gitq--unquote (car tokens)))))
+    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
+                 (gitq--unquote (car tokens)))))
+      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
+      (list :type 'terminal :op 'reword :message msg)))
    ((equal kw "commit")
-    (list :type 'terminal :op 'commit
-          :message (when (and tokens (string-prefix-p "\"" (car tokens)))
-                     (gitq--unquote (car tokens)))))
+    (let ((msg (when (and tokens (string-prefix-p "\"" (car tokens)))
+                 (gitq--unquote (car tokens)))))
+      (gitq--expect-no-more (if msg (cdr tokens) tokens) kw)
+      (list :type 'terminal :op 'commit :message msg)))
    ((equal kw "mark")
-    (list :type 'terminal :op 'mark
-          :label (when tokens (gitq--unquote (car tokens)))))
+    (gitq--expect-no-more (cdr tokens) kw)
+    (list :type 'terminal :op 'mark :label (when tokens (gitq--unquote (car tokens)))))
    (t (error "gitq: unknown terminal operation '%s'" kw))))
 
 (defun gitq--parse-source (tokens)
@@ -287,17 +326,26 @@
     (cond
      ((member kw '("commits" "commit"))
       (if (equal (car rest) "in")
-          ;; Join all remaining tokens to reconstruct "main..feature" etc.
-          (list :type 'source :source 'commits
-                :range (apply #'concat (cdr rest)))
+          (progn
+            (unless (cdr rest) (error "gitq: missing range after 'in'"))
+            ;; Join all remaining tokens to reconstruct "main..feature" etc.
+            (list :type 'source :source 'commits
+                  :range (apply #'concat (cdr rest))))
+        (gitq--expect-no-more rest kw)
         (list :type 'source :source 'commits :range nil)))
-     ((equal kw "branches") (list :type 'source :source 'branches))
-     ((equal kw "tags")     (list :type 'source :source 'tags))
+     ((equal kw "branches")
+      (gitq--expect-no-more rest kw) (list :type 'source :source 'branches))
+     ((equal kw "tags")
+      (gitq--expect-no-more rest kw) (list :type 'source :source 'tags))
      ((member kw '("worktrees" "worktree"))
-      (list :type 'source :source 'worktree))
-     ((equal kw "blobs")    (list :type 'source :source 'blobs))
-     ((equal kw "refs")     (list :type 'source :source 'refs))
-     (t (list :type 'source :source 'ref :ref kw)))))
+      (gitq--expect-no-more rest kw) (list :type 'source :source 'worktree))
+     ((equal kw "blobs")
+      (gitq--expect-no-more rest kw) (list :type 'source :source 'blobs))
+     ((equal kw "refs")
+      (gitq--expect-no-more rest kw) (list :type 'source :source 'refs))
+     (t
+      (gitq--expect-no-more rest kw)
+      (list :type 'source :source 'ref :ref kw)))))
 
 (defun gitq--parse-stage (stage-str &optional is-source)
   "Parse a single pipeline stage string into an AST node plist."
@@ -312,15 +360,19 @@
        ((equal kw "grep")    (gitq--parse-grep rest))
        ((equal kw "pickaxe") (gitq--parse-pickaxe rest))
        ((equal kw "path")
+        (gitq--expect-no-more (cdr rest) kw)
         (list :type 'path :pattern (gitq--unquote (car rest))))
        ((equal kw "pick")    (gitq--parse-pick rest))
        ((equal kw "take")
+        (gitq--expect-no-more (cdr rest) kw)
         (list :type 'take :n (string-to-number (car rest))))
        ((equal kw "skip")
+        (gitq--expect-no-more (cdr rest) kw)
         (list :type 'skip :n (string-to-number (car rest))))
-       ((equal kw "first")   (list :type 'first))
-       ((equal kw "last")    (list :type 'last))
+       ((equal kw "first") (gitq--expect-no-more rest kw) (list :type 'first))
+       ((equal kw "last")  (gitq--expect-no-more rest kw) (list :type 'last))
        ((equal kw "sort")
+        (gitq--expect-no-more (cdr rest) kw)
         (let* ((f   (car rest))
                (neg (string-prefix-p "-" f))
                (fn  (intern (substring (if neg (substring f 1) f) 1))))
@@ -1074,7 +1126,11 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
             (while (and (< i len) (not (eq (aref str i) ?\")))
               (when (eq (aref str i) ?\\) (setq i (1+ i)))
               (setq i (1+ i)))
-            (setq i (1+ i))
+            ;; See the matching comment in `gitq--split-pipeline': don't
+            ;; consume a closing quote that was never found -- this runs
+            ;; on every keystroke via live completion, so an in-progress,
+            ;; still-unterminated quote must never error here.
+            (when (< i len) (setq i (1+ i)))
             (push (substring str s i) tokens)))
          ((eq c ?/)
           ;; Scan forward to see if there is a matching closing /.
