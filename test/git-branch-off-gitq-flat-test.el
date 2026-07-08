@@ -160,7 +160,7 @@ since `path' needs a `:path' field and commit frames don't carry one."
                     ("pick"     "sha")
                     ;; a bare non-flag field is a type error now, so the
                     ;; `where' dummy must be a full typed condition
-                    ("where"    "message contains \"x\"")
+                    ("where"    "message \"x\"")
                     (_          "")))
            (pipeline (string-trim (format "%s %s %s" source kw dummy)))
            (nodes    (gitq--parse-flat pipeline)))
@@ -187,18 +187,20 @@ worktree source (`modified' is a flag; commit frames have none)."
     (should (= (plist-get (nth 2 nodes) :n) 3))))
 
 (ert-deftest gitq-flat-test/p3-where-value-step-keyword-errors ()
-  "P3: unquoted step keyword in where value position is an error."
+  "P3: unquoted step keyword in where value position is an error.
+No explicit `contains' keyword anymore -- a bare value directly after
+a string-typed field is an implicit contains."
   (dolist (kw gitq-flat-test--all-step-keywords)
-    ;; where message contains KEYWORD — KEYWORD is reserved, must error
+    ;; where message KEYWORD — KEYWORD is reserved, must error
     (should-error
-     (gitq--parse-flat (format "commits where message contains %s" kw))
+     (gitq--parse-flat (format "commits where message %s" kw))
      :type 'error)))
 
 (ert-deftest gitq-flat-test/p3-where-quoted-step-keyword-is-value ()
   "P3: quoted step keyword in where value position is accepted as a string value."
   (dolist (kw gitq-flat-test--all-step-keywords)
-    ;; where message contains "KEYWORD" — quoted, so it's a value
-    (let* ((pipeline (format "commits where message contains \"%s\"" kw))
+    ;; where message "KEYWORD" — quoted, so it's a value
+    (let* ((pipeline (format "commits where message \"%s\"" kw))
            (nodes    (gitq--parse-flat pipeline))
            (where    (cadr nodes))
            (cond1    (car (plist-get where :conditions))))
@@ -320,20 +322,28 @@ standalone path step — see the dedicated ambiguity test below."
 
 (ert-deftest gitq-flat-test/p5-path-step-after-where-is-loud ()
   "On a path-carrying frame, a `path' STEP directly after a where-clause
-is unwritable — `path' chains as a where FIELD instead, and its glob
-argument then fails operator validation LOUDLY.  It used to silently
-parse as a garbage condition (operator `\"*\"', value t) that matched
-nothing.  Write `path GLOB' before `where', or use `where path matches'."
-  (let ((err (should-error (gitq--parse-flat "worktrees where modified path \"*\""))))
-    (should (string-match-p "unknown where operator" (error-message-string err)))))
+is unwritable — `path' chains as a where FIELD instead. Since `path' is
+a string-typed field, its quoted argument is now a valid implicit
+`contains' value (`where path \"*\"' means \"path contains a literal
+asterisk\"), not an operator-validation error — write `path GLOB' before
+`where' if a standalone glob-filter step was intended instead."
+  (let* ((nodes (gitq--parse-flat "worktrees where modified path \"*\""))
+         (where (cadr nodes))
+         (conds (plist-get where :conditions)))
+    (should (= (length conds) 2))
+    (should (eq (plist-get (nth 0 conds) :field) 'modified))
+    (should (eq (plist-get (nth 1 conds) :field) 'path))
+    (should (eq (plist-get (nth 1 conds) :op) 'contains))
+    (should (equal (plist-get (nth 1 conds) :value) "*"))))
 
 (ert-deftest gitq-flat-test/p5-bare-non-flag-field-still-hits-boundary ()
-  "P5 under typing: a bare NON-flag field before a step keyword is a
-flag-type error — proving the boundary was still detected (the step
-keyword was NOT consumed as a where-operator, which would raise the
-unknown-operator error instead)."
+  "P5 under typing: a step keyword right after a non-flag field is a
+quote-it-or-add-an-operator error — proving the boundary was still
+detected (the step keyword was NOT silently consumed as an unquoted
+where-value, which is exactly the ambiguity there's no explicit
+`contains' keyword to separate field from value anymore)."
   (let ((err (should-error (gitq--parse-flat "commits where author take 5"))))
-    (should (string-match-p "tests a flag" (error-message-string err)))))
+    (should (string-match-p "must be quoted" (error-message-string err)))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────
 ;;; PROPERTY P6: Source range terminates at step keywords
@@ -363,7 +373,7 @@ and covered separately by `p6-range-then-diff-then-path' below."
     (let* ((arg (pcase kw
                   ("take" "1") ("skip" "0") ("sort" "date")
                   ("via" ".parent") ("grep" "\"x\"") ("pickaxe" "\"x\"")
-                  ("pick" "sha") ("where" "message contains \"x\"") (_ "")))
+                  ("pick" "sha") ("where" "message \"x\"") (_ "")))
            (pipeline (string-trim (format "commits in main %s %s" kw arg)))
            (nodes    (gitq--parse-flat pipeline))
            (src      (car nodes)))
@@ -488,12 +498,12 @@ executor can never again silently ignore it."
 
 (ert-deftest gitq-flat-test/cross-regex-value-then-terminal ()
   "Regex value in where, then /terminal — not confused."
-  (let* ((nodes (gitq--parse-flat "commits where message matches /fix.*/ /count"))
+  (let* ((nodes (gitq--parse-flat "commits where message regex /fix.*/ /count"))
          (where (cadr nodes))
          (term  (nth 2 nodes))
          (cond1 (car (plist-get where :conditions))))
     (should (equal (plist-get cond1 :value) "fix.*"))
-    (should (eq (plist-get cond1 :op) 'matches))
+    (should (eq (plist-get cond1 :op) 'regex))
     (should (eq (plist-get term :op) 'count))))
 
 (ert-deftest gitq-flat-test/cross-operator-then-step-keyword-is-error ()
@@ -517,9 +527,9 @@ executor can never again silently ignore it."
     (should (eq (plist-get term :op) 'show))))
 
 (ert-deftest gitq-flat-test/cross-via-parent-then-where-then-take ()
-  "via .parent* where author contains alice take 5 — three steps, each distinct."
+  "via .parent* where author alice take 5 — three steps, each distinct."
   (let* ((nodes (gitq--parse-flat
-                 "commits via .parent* where author contains alice take 5 /show")))
+                 "commits via .parent* where author alice take 5 /show")))
     (should (= (length nodes) 5))
     (should (eq (plist-get (nth 0 nodes) :type) 'source))
     (should (eq (plist-get (nth 1 nodes) :type) 'via))
@@ -578,7 +588,7 @@ executor can never again silently ignore it."
   "Every step keyword in an unquoted where value position errors — exhaustive."
   (dolist (kw gitq-flat-test--all-step-keywords)
     (should-error
-     (gitq--parse-flat (format "commits where message contains %s" kw))
+     (gitq--parse-flat (format "commits where message %s" kw))
      :type 'error)))
 
 ;;; ─────────────────────────────────────────────────────────────────────────

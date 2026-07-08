@@ -184,16 +184,17 @@ requirement Consult itself documents for its own grep-style commands.
 the tasks that would otherwise each need their own command:
 
 #+begin_example
-  commits where author contains "alice" take 5 /show
-  HEAD via .parent* where message contains "fix" /count
+  commits where author alice take 5 /show
+  HEAD via parent* where message "fix" /count
   commits pickaxe "some-function" first /worktree
-  HEAD via .tree.entries.history sort -date first /copy
+  HEAD via tree.entries.history sort -date first /copy
 #+end_example
 
 A pipeline is =source [step...] [/terminal]=: a source produces typed frames
 (=commits=, =branches=, =worktrees=, =blobs=, =HEAD=, any ref), steps
-transform them (=via= morphism paths like =.parent[0].tree.entries[Blob]=
-compose and type-check segment by segment; =where= / =sort= / =pick= /
+transform them (=via= morphism paths like =parent[0].tree.entries[Blob]=
+compose and type-check segment by segment — the historical leading-dot
+spelling, e.g. =.parent[0]=, still works too; =where= / =sort= / =pick= /
 =take= / =grep= / =pickaxe= behave as their SQL/PRQL/jq counterparts), and a
 =/terminal= acts on the result (=/show= =/copy= =/count= =/branch-off=
 =/reword= =/remove= =/worktree= ...).
@@ -201,13 +202,16 @@ compose and type-check segment by segment; =where= / =sort= / =pick= /
 Everything is validated at parse time against the frame shape actually
 flowing through the pipeline — unknown fields, operators that don't fit a
 field's type, or morphisms applied to the wrong object are immediate,
-specific errors, not empty results.  The minibuffer completes each token
-contextually (with live preview of results as you type), and a standalone
-=bin/gitq= CLI plus zsh completion ship in the repo.
+specific errors, not empty results.  There is no explicit =contains=
+keyword: a value right after a field with no recognized operator between
+them is an implicit substring match (=where author alice=), for field types
+where that makes sense.  The minibuffer completes each token contextually
+(with live preview of results as you type), and a standalone =bin/gitq= CLI
+plus zsh completion ship in the repo.
 
 The full design — the typed categorical model, grammar, and extension guide —
 is documented in [[file:doc/gitq.org][doc/gitq.org]]; [[file:doc/examples.org][doc/examples.org]] is a set of worked examples
-with real captured outputs, including the pickaxe + =.diff.lines= workflow
+with real captured outputs, including the pickaxe + =diff.lines= workflow
 for seeing matched diff content in the results buffer.
 
 * Installation

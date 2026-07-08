@@ -194,15 +194,17 @@ carry (not blobs) -- reach a line frame first via `grep'."
     (should (equal (plist-get cond :value) "alice"))))
 
 (ert-deftest gitq-test--parse-where/contains ()
-  (let* ((nodes (gitq--parse-flat "commits where message contains \"fix\" /show"))
+  "There is no explicit `contains' keyword -- a value directly after a
+field (no recognized operator between them) is an implicit contains."
+  (let* ((nodes (gitq--parse-flat "commits where message \"fix\" /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
     (should (eq (plist-get cond :op) 'contains))
     (should (equal (plist-get cond :value) "fix"))))
 
 (ert-deftest gitq-test--parse-where/matches-regex ()
-  (let* ((nodes (gitq--parse-flat "commits where message matches /^feat:/ /show"))
+  (let* ((nodes (gitq--parse-flat "commits where message regex /^feat:/ /show"))
          (cond  (car (plist-get (nth 1 nodes) :conditions))))
-    (should (eq (plist-get cond :op) 'matches))
+    (should (eq (plist-get cond :op) 'regex))
     (should (equal (plist-get cond :value) "^feat:"))))
 
 (ert-deftest gitq-test--parse-where/numeric-gt ()
@@ -214,7 +216,7 @@ carry (not blobs) -- reach a line frame first via `grep'."
 
 (ert-deftest gitq-test--parse-where/multiple-conditions ()
   "Multiple where conditions separated by commas."
-  (let* ((nodes (gitq--parse-flat "commits where author == \"alice\", message contains \"fix\" /show"))
+  (let* ((nodes (gitq--parse-flat "commits where author == \"alice\", message \"fix\" /show"))
          (conds (plist-get (nth 1 nodes) :conditions)))
     (should (= (length conds) 2))
     (should (eq (plist-get (nth 0 conds) :field) 'author))
@@ -552,8 +554,8 @@ time instead of silently picking nil for them."
 
 (ert-deftest gitq-test--eval-condition/matches-regex ()
   (let ((frame '(:type commit :message "feat: new login")))
-    (should (gitq--eval-condition frame (gitq-test--cond 'message 'matches "^feat:")))
-    (should-not (gitq--eval-condition frame (gitq-test--cond 'message 'matches "^fix:")))))
+    (should (gitq--eval-condition frame (gitq-test--cond 'message 'regex "^feat:")))
+    (should-not (gitq--eval-condition frame (gitq-test--cond 'message 'regex "^fix:")))))
 
 (ert-deftest gitq-test--eval-condition/numeric-gt ()
   (let ((frame '(:type commit :parents ("a" "b"))))
@@ -932,13 +934,13 @@ index abc..def 100644\n\
         (should (> (buffer-size) 0))))))
 
 (ert-deftest gitq-test--integration/full-query-where-message ()
-  "commits where message contains X /show filters correctly."
+  "commits where message X /show filters correctly (implicit contains)."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "a.txt" "1\n" "fix: auth issue")
     (gitq-test--commit "b.txt" "2\n" "feat: new widget")
     (gitq-test--commit "c.txt" "3\n" "fix: logging bug")
-    (gitq "commits where message contains \"fix\" /show")
+    (gitq "commits where message \"fix\" /show")
     (let ((buf (get-buffer "*gitq*")))
       (with-current-buffer buf
         ;; Should show 2 fix commits, not the feat one
@@ -1032,7 +1034,7 @@ preview is nil."
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "commit by test user")
     (let ((r (gitq--preview-frames
-              "commits where author contains \"Test\"")))
+              "commits where author \"Test\"")))
       (should (eq (car r) :ok))
       (should (= (length (cdr r)) 1)))))
 
@@ -1085,8 +1087,8 @@ preview is nil."
   (should (equal (gitq--token-kind "take") "step")))
 
 (ert-deftest gitq-test--token-kind/morphism ()
-  (should (equal (gitq--token-kind ".parent") "morphism"))
-  (should (equal (gitq--token-kind ".parent*") "morphism")))
+  (should (equal (gitq--token-kind "parent") "morphism"))
+  (should (equal (gitq--token-kind "parent*") "morphism")))
 
 (ert-deftest gitq-test--token-kind/field ()
   (should (equal (gitq--token-kind "date") "field"))
@@ -1094,7 +1096,7 @@ preview is nil."
   (should (equal (gitq--token-kind "-date") "field")))
 
 (ert-deftest gitq-test--token-kind/operator ()
-  (should (equal (gitq--token-kind "contains") "operator"))
+  (should (equal (gitq--token-kind "regex") "operator"))
   (should (equal (gitq--token-kind "==") "operator")))
 
 (ert-deftest gitq-test--token-kind/terminal ()
@@ -1192,16 +1194,20 @@ stage, not as a fresh `path' step -- see `gitq--field-names' docstring."
     (should (gitq--complete-candidates "commits where date after "))))
 
 (ert-deftest gitq-test--complete-candidates/path-same-list-for-eq-and-contains ()
-  "`path == ' and `path contains ' must offer the identical candidate set."
+  "`path == ' and bare `path ' (implicit contains) must offer the same
+value candidates -- the bare position also mixes in operator keywords,
+since there's no explicit `contains' keyword and typing a value
+directly is just as valid as typing an operator first. Uses `blobs'
+\(not `commits', which have no `:path' field at all) as the source."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "a.txt" "x\n" "add a")
     (gitq-test--commit "b.txt" "y\n" "add b")
-    (let ((eq-cands       (gitq--complete-candidates "commits where path == "))
-          (contains-cands (gitq--complete-candidates "commits where path contains ")))
+    (let ((eq-cands   (gitq--complete-candidates "blobs where path == "))
+          (bare-cands (gitq--complete-candidates "blobs where path ")))
       (should (member "a.txt" eq-cands))
       (should (member "b.txt" eq-cands))
-      (should (equal eq-cands contains-cands)))))
+      (should (cl-every (lambda (c) (member c bare-cands)) eq-cands)))))
 
 (ert-deftest gitq-test--complete-candidates/name-and-branch-are-refs ()
   :tags '(integration)
@@ -1226,7 +1232,11 @@ stage, not as a fresh `path' step -- see `gitq--field-names' docstring."
   :tags '(integration)
   (gitq-test--with-repo
     (gitq-test--commit "f.txt" "x\n" "init")
-    (should (null (gitq--complete-candidates "commits where message contains ")))
+    ;; Right after `message' (a freeform field with no git-derivable
+    ;; value list), only the operator keywords are offered -- no value
+    ;; candidates get merged in, unlike e.g. `author'/`path'.
+    (should (equal (gitq--complete-candidates "commits where message ")
+                   gitq--complete-where-operators))
     (should (null (gitq--complete-candidates "commits where modified is ")))
     (should (null (gitq--complete-candidates "commits where parents-count > ")))))
 
@@ -1422,7 +1432,7 @@ fully-quoted, multi-word value case."
                  '("where" "date" "after" "2026-05-25"))))
 
 (ert-deftest gitq-test--parse/bare-sha-prefix-where-value ()
-  (should (equal (gitq--parse-flat "commits where sha contains 062062e9af")
+  (should (equal (gitq--parse-flat "commits where sha 062062e9af")
                  '((:type source :source commits :range nil)
                    (:type where :conditions ((:field sha :op contains :value "062062e9af")))))))
 
@@ -1541,14 +1551,14 @@ original fields."
     (should-not (member "message" cands))))
 
 (ert-deftest gitq-test--complete-candidates/via-morphisms-narrowed-by-source ()
-  "`.tree'/`.parent*' (need `:tree'/`:parents-count', commit-only) are
-excluded after a `branches' source; `.tree.blobs' (just needs `:sha',
+  "`tree'/`parent*' (need `:tree'/`:parents-count', commit-only) are
+excluded after a `branches' source; `tree.blobs' (just needs `:sha',
 which ref frames have) is still offered."
   (let ((cands (gitq--complete-candidates "branches via ")))
-    (should-not (member ".tree" cands))
-    (should-not (member ".parent*" cands))
-    (should (member ".tree.blobs" cands))
-    (should (member ".diff" cands))))
+    (should-not (member "tree" cands))
+    (should-not (member "parent*" cands))
+    (should (member "tree.blobs" cands))
+    (should (member "diff" cands))))
 
 ;;; ─────────────────────────────────────────────────────────────────────────────
 ;;; Tests: morphism composition (dotted chains parse generically)
@@ -1616,7 +1626,7 @@ which ref frames have) is still offered."
 (ert-deftest gitq-test--diff-lines/where-content-typechecks ()
   "diff-line frames carry `content'/`sign', so filtering on them parses."
   (should (gitq--parse-flat
-           "commits via .diff.lines where content contains \"x\""))
+           "commits via .diff.lines where content \"x\""))
   (should (gitq--parse-flat
            "commits via .diff.lines where sign == \"+\" pick path, content")))
 
@@ -1661,7 +1671,7 @@ leaves exactly the matched diff lines — including the root commit
     (gitq-test--commit "b.txt" "unrelated\n" "unrelated")
     (let* ((exec (gitq--exec-nodes
                   (gitq--parse-flat
-                   "commits pickaxe \"needle\" via .diff.lines where content contains \"needle\"")))
+                   "commits pickaxe \"needle\" via .diff.lines where content \"needle\"")))
            (frames (car exec)))
       ;; Two commits touched "needle": one added it, one removed it.
       (should (= (length frames) 2))
@@ -1722,7 +1732,11 @@ field name (so type errors always name real fields)."
 ;;; ─────────────────────────────────────────────────────────────────────────────
 
 (ert-deftest gitq-test--scalar/unknown-operator-is-parse-error ()
-  (let ((err (should-error (gitq--parse-flat "commits where author sortof \"x\""))))
+  "`author' is string-typed (implicit-contains-eligible), so an
+unrecognized token there is now a valid implicit-contains value, not
+an error -- use a non-eligible field type (`date') to exercise the
+genuine unknown-operator error path."
+  (let ((err (should-error (gitq--parse-flat "commits where date sortof \"2020-01-01\""))))
     (should (string-match-p "unknown where operator" (error-message-string err)))))
 
 (ert-deftest gitq-test--scalar/numeric-op-on-date-is-parse-error ()
@@ -1840,6 +1854,148 @@ commit must error, not silently amend HEAD anyway."
    (gitq--apply-terminal (gitq-test--commits 1)
                          '(:type terminal :op frobnicate)
                          "probe")))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: bare (dot-free) morphism spellings
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;
+;; The leading dot on `via' morphisms was only ever a tokenizer artifact --
+;; the sole way to get `*'/`+'/`['/`]'/a second `.' into one token. The
+;; tokenizer's bare-word class was widened to allow those directly, and
+;; `gitq--parse-morphism-path' normalizes a dot-free path before matching,
+;; so bare and dotted spellings must parse identically; the dotted spelling
+;; is kept working for any existing saved queries or docs.
+
+(ert-deftest gitq-test--bare-morphism/simple-forms-match-dotted ()
+  (dolist (pair '(("parent" . ".parent") ("tree" . ".tree")
+                  ("diff" . ".diff") ("history" . ".history")
+                  ("commit" . ".commit")))
+    (should (equal (gitq--parse-morphism-path (car pair))
+                   (gitq--parse-morphism-path (cdr pair))))))
+
+(ert-deftest gitq-test--bare-morphism/modifier-forms-tokenize-as-one-word ()
+  "Characters `*'/`+'/`['/`]' used to only tokenize inside a dot-triggered
+token; bare `parent*'/`tree.entries[Blob]' must tokenize as ONE token,
+not silently split (dropping the modifier) or error."
+  (should (equal (gitq--tokenize-flat "via parent*") '("via" "parent*")))
+  (should (equal (gitq--tokenize-flat "via parent+") '("via" "parent+")))
+  (should (equal (gitq--tokenize-flat "via tree.entries[Blob]")
+                 '("via" "tree.entries[Blob]")))
+  (should (equal (gitq--tokenize-flat "via diff.hunks") '("via" "diff.hunks")))
+  (should (equal (gitq--tokenize-flat "via parent†") '("via" "parent†"))))
+
+(ert-deftest gitq-test--bare-morphism/modifier-forms-match-dotted ()
+  (dolist (pair '(("parent*" . ".parent*") ("parent+" . ".parent+")
+                  ("parent†" . ".parent†")
+                  ("tree.entries[Blob]" . ".tree.entries[Blob]")
+                  ("diff.hunks" . ".diff.hunks")))
+    (should (equal (gitq--parse-morphism-path (car pair))
+                   (gitq--parse-morphism-path (cdr pair))))))
+
+(ert-deftest gitq-test--bare-morphism/composed-path-works ()
+  "Bare composed paths (`parent.tree', multiple morphisms in one token)
+expand to the same node list as their dotted equivalent."
+  (should (equal (gitq--parse-morphism-path "parent.tree")
+                 (gitq--parse-morphism-path ".parent.tree"))))
+
+(ert-deftest gitq-test--bare-morphism/unknown-still-errors ()
+  (should-error (gitq--parse-morphism-path "notarealmorphism")))
+
+(ert-deftest gitq-test--bare-morphism/end-to-end-parse ()
+  (should (equal (gitq--parse-flat "commits via diff")
+                 (gitq--parse-flat "commits via .diff"))))
+
+(ert-deftest gitq-test--bare-morphism/domain-check-still-applies ()
+  "Domain checking doesn't care which spelling was used."
+  (should-error (gitq--parse-flat "branches via tree"))
+  (should-error (gitq--parse-flat "branches via .tree")))
+
+(ert-deftest gitq-test--complete-candidates/morphisms-are-bare ()
+  (let ((cands (gitq--complete-candidates "commits via ")))
+    (should (member "diff" cands))
+    (should (member "parent*" cands))
+    (should-not (member ".diff" cands))))
+
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;; Tests: implicit `contains' (no explicit keyword)
+;;; ─────────────────────────────────────────────────────────────────────────────
+;;
+;; There is no `contains' keyword: a value directly after a string/sha-typed
+;; field with no recognized operator in between is an implicit substring
+;; match. `date'/`number'/`flag' fields have no such fallback -- an
+;; unrecognized token there is still an "unknown where operator" error.
+
+(ert-deftest gitq-test--implicit-contains/bare-value-is-contains ()
+  (let* ((nodes (gitq--parse-flat "commits where author alice"))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :op) 'contains))
+    (should (equal (plist-get cond1 :value) "alice"))))
+
+(ert-deftest gitq-test--implicit-contains/quoted-value-also-works ()
+  (let* ((nodes (gitq--parse-flat "commits where message \"fix: auth\""))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :op) 'contains))
+    (should (equal (plist-get cond1 :value) "fix: auth"))))
+
+(ert-deftest gitq-test--implicit-contains/sha-field-eligible ()
+  (let* ((nodes (gitq--parse-flat "commits where sha 062062e9af"))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :op) 'contains))))
+
+(ert-deftest gitq-test--implicit-contains/explicit-operator-still-works ()
+  "Recognized operators still take precedence over implicit contains."
+  (let* ((nodes (gitq--parse-flat "commits where author == \"alice\""))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :op) '==))))
+
+(ert-deftest gitq-test--implicit-contains/regex-keyword-still-explicit ()
+  "`matches' was renamed to `regex' -- still an explicit, typable operator."
+  (let* ((nodes (gitq--parse-flat "commits where message regex /^fix/"))
+         (cond1 (car (plist-get (cadr nodes) :conditions))))
+    (should (eq (plist-get cond1 :op) 'regex))
+    (should (equal (plist-get cond1 :value) "^fix"))))
+
+(ert-deftest gitq-test--implicit-contains/contains-keyword-no-longer-recognized ()
+  "`contains' is no longer typable at all -- it's read as an implicit-contains
+VALUE for the previous field, so a second field name right after it is
+trailing garbage (there's no operator position left for it to fill)."
+  (should-error (gitq--parse-flat "commits where author contains \"alice\"")))
+
+(ert-deftest gitq-test--implicit-contains/non-eligible-type-still-errors ()
+  "`date'/`number'/`flag' fields have no implicit fallback -- a bogus
+token there is still an unknown-operator error, not silently accepted
+as a value."
+  (should-error (gitq--parse-flat "commits where date bogus \"2020-01-01\""))
+  (should-error (gitq--parse-flat "commits where parents-count bogus 5")))
+
+(ert-deftest gitq-test--implicit-contains/unquoted-step-keyword-still-errors ()
+  "A step keyword right after a non-flag field must still be quoted --
+there's no `contains' keyword left to separate field from value, so
+this is the only thing standing between `where message take' silently
+ending the clause and it being read as an unquoted value."
+  (let ((err (should-error (gitq--parse-flat "commits where message take"))))
+    (should (string-match-p "must be quoted" (error-message-string err)))))
+
+(ert-deftest gitq-test--implicit-contains/flag-field-boundary-unaffected ()
+  "A step keyword right after a FLAG field still cleanly ends the bare
+flag test, same as before -- only non-flag fields get the new
+quote-or-operator error."
+  (let* ((nodes (gitq--parse-flat "worktrees where modified take 5"))
+         (where (cadr nodes))
+         (take  (nth 2 nodes)))
+    (should (eq (plist-get (car (plist-get where :conditions)) :op) 'is))
+    (should (eq (plist-get take :type) 'take))))
+
+(ert-deftest gitq-test--complete-candidates/field-position-offers-operators-and-values ()
+  "Right after a contains-eligible field with nothing typed yet, both
+operator keywords and value candidates are offered (no explicit
+`contains' keyword to type first)."
+  :tags '(integration)
+  (gitq-test--with-repo
+    (gitq-test--commit "f.txt" "x\n" "init by tester")
+    (let ((cands (gitq--complete-candidates "commits where author ")))
+      (should (member "==" cands))
+      (should (member "Test User" cands)))))
 
 (provide 'git-branch-off-gitq-test)
 ;;; git-branch-off-gitq-test.el ends here

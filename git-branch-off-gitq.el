@@ -528,9 +528,12 @@ empty, so the cursors stay in sync."
       ('<        (and (numberp actual) (numberp value) (< actual value)))
       ('>=       (and (numberp actual) (numberp value) (>= actual value)))
       ('<=       (and (numberp actual) (numberp value) (<= actual value)))
+      ;; `contains' is never typed explicitly (see `gitq--implicit-contains-types')
+      ;; -- it's the implicit operator `gitq--flat-parse-where' assigns when no
+      ;; recognized keyword follows an eligible-type field.
       ('contains (and (stringp actual) (stringp value)
                       (string-match-p (regexp-quote value) actual)))
-      ('matches  (and (stringp actual) (stringp value)
+      ('regex    (and (stringp actual) (stringp value)
                       (string-match-p value actual)))
       ('after    (gitq--date-op actual value #'>))
       ('before   (gitq--date-op actual value #'<))
@@ -1058,8 +1061,7 @@ look types up unconditionally.")
     ("<"        . (number))
     (">="       . (number))
     ("<="       . (number))
-    ("contains" . (string sha))
-    ("matches"  . (string sha))
+    ("regex"    . (string sha))
     ("after"    . (date))
     ("before"   . (date))
     ("within"   . (date))
@@ -1071,7 +1073,13 @@ an unknown-operator parse error (it used to parse fine and only blow up
 and applying an operator to a field whose type it doesn't accept (e.g.
 `date > \"2020-01-01\"', where `>' compares numbers so the condition was
 always silently false) is a parse-time type error suggesting the
-operators that DO fit the field.")
+operators that DO fit the field.
+
+There is no `contains' entry: it's not a typable keyword at all (see
+`gitq--implicit-contains-types') — a value right after a field with no
+recognized operator between them is an implicit substring match
+instead, so `where author alice' replaces the old
+`where author contains alice'.")
 
 (defun gitq--field-type (field)
   "Return the scalar type symbol for FIELD (a string or symbol).
@@ -1232,14 +1240,23 @@ multi-segment forms here (`.tree.entries', `.diff.hunks', ...) are
 single morphisms for efficiency and history, but they parse, type-check
 and execute exactly as their name reads.")
 
-(defun gitq--parse-morphism-path (path)
-  "Parse PATH — one or more dotted morphism forms — into a list of via nodes.
+(defun gitq--parse-morphism-path (raw-path)
+  "Parse RAW-PATH — one or more morphism forms — into a list of via nodes.
+May be written bare (`parent', `tree.entries[Blob]', `parent.tree') or
+with the historical leading dot (`.parent', ...) — both are accepted,
+normalized to the same dotted form below before matching. The dot was
+only ever a tokenizer artifact: it used to be the sole way to get
+`*'/`+'/`['/`]'/a second `.' into one token, so composed or modified
+paths needed it; the tokenizer's bare-word class was widened to allow
+those characters directly (see `gitq--tokenize-flat'), so the dot is
+no longer required, just still silently accepted for any saved
+queries or docs that already use it.
 Greedy longest-match against `gitq--morphism-forms' at each position;
 a segment boundary must be a `.' or the end of the path.  Errors on
 the first unrecognizable segment, naming it and the full path."
-  (let ((pos 0) (len (length path)) nodes)
-    (unless (and (> len 0) (eq (aref path 0) ?.))
-      (error "gitq: unknown morphism '%s'" path))
+  (unless raw-path (error "gitq: 'via' requires a morphism"))
+  (let* ((path (if (string-prefix-p "." raw-path) raw-path (concat "." raw-path)))
+         (pos 0) (len (length path)) nodes)
     (while (< pos len)
       (let (best-node (best-end pos))
         (dolist (entry gitq--morphism-forms)
@@ -1253,7 +1270,7 @@ the first unrecognizable segment, naming it and the full path."
         (unless best-node
           (error "gitq: unknown morphism '%s'%s"
                  (substring path pos)
-                 (if (> pos 0) (format " (in '%s')" path) "")))
+                 (if (> pos 0) (format " (in '%s')" raw-path) "")))
         (push best-node nodes)
         (setq pos best-end)))
     (nreverse nodes)))
@@ -1362,17 +1379,25 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
                           (or (and (>= d ?a) (<= d ?z))
                               (and (>= d ?A) (<= d ?Z))
                               (and (>= d ?0) (<= d ?9))
-                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?})))))
+                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?} ?. ?* ?+ ?\[ ?\]))
+                              (eq d #x2020))))
               (setq i (1+ i)))
             (push (substring str s i) tokens)))
          ((or (and (>= c ?a) (<= c ?z)) (and (>= c ?A) (<= c ?Z)) (eq c ?_))
+          ;; Same extended set as the digit-starting branch above,
+          ;; including `.'/`*'/`+'/`['/`]' -- this is what lets bare
+          ;; (dot-free) morphism paths like `diff.hunks'/`parent*'/
+          ;; `tree.entries[Blob]' tokenize as one word, matching what
+          ;; the historical leading-dot spelling's own tokenizer branch
+          ;; already allowed. See `gitq--parse-morphism-path'.
           (let ((s i))
             (while (and (< i len)
                         (let ((d (aref str i)))
                           (or (and (>= d ?a) (<= d ?z))
                               (and (>= d ?A) (<= d ?Z))
                               (and (>= d ?0) (<= d ?9))
-                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?})))))
+                              (memq d '(?- ?_ ?/ ?~ ?@ ?{ ?} ?. ?* ?+ ?\[ ?\]))
+                              (eq d #x2020))))
               (setq i (1+ i)))
             (push (substring str s i) tokens)))
          (t (setq i (1+ i))))))
@@ -1396,6 +1421,28 @@ Like `gitq--tokenize' but distinguishes /command terminal tokens from
       (gitq--flat-step-p tok)
       (gitq--flat-terminal-p tok)))
 
+(defconst gitq--implicit-contains-types '(string sha)
+  "Field scalar types eligible for the implicit `contains' (substring)
+match applied when the token right after a field in a `where' clause is
+not a recognized operator keyword — see `gitq--flat-parse-where'. There
+is no explicit `contains' keyword (it's not in `gitq--operator-signatures'
+or `gitq--complete-where-operators'; `where author alice' means
+`where author == alice' would have meant \"equals\", so it instead means
+a substring match, same as the old `where author contains alice'). This
+table exists because `contains' as an executed condition (see
+`gitq--eval-condition') still needs to know which field types it's ever
+sensible to fall back to it for — `date'/`number'/`flag' fields get a
+regular \"unknown where operator\" error instead, same as any other
+unrecognized token in that position.")
+
+(defun gitq--flat-parse-where-value (val-tok)
+  "Parse a where-condition's raw VAL-TOK into its runtime value."
+  (cond
+   ((string-prefix-p "\"" val-tok) (gitq--unquote val-tok))
+   ((string-prefix-p "/" val-tok)  (gitq--unregex val-tok))
+   ((string-match-p "^[0-9]+$" val-tok) (string-to-number val-tok))
+   (t val-tok)))
+
 (defun gitq--flat-parse-where (tokens current-fields)
   "Parse where-conditions from flat TOKENS, returning (node . remaining).
 Step keywords and /terminals act as stage boundaries and are never consumed
@@ -1404,7 +1451,13 @@ field-set actually carried by the frame type flowing into this `where'
 (not the flat global union of every field on every frame type) — so
 e.g. `commits where name == ...' is a parse-time error naming exactly
 which fields a commit frame has, instead of silently matching nothing
-at run time because commit frames have no `:name'."
+at run time because commit frames have no `:name'.
+
+There is no explicit `contains' keyword: a token right after a field
+that isn't a recognized operator is taken directly as the value, with
+an implicit `contains' (substring) condition, for field types where
+that's sensible (`gitq--implicit-contains-types') — `where author alice'
+means `where author contains alice' used to."
   (unless (or (null tokens) (member (car tokens) current-fields)
               (gitq--flat-boundary-p (car tokens)))
     (error "gitq: field '%s' not valid here after 'where' (current frame has: %s)"
@@ -1416,19 +1469,32 @@ at run time because commit frames have no `:name'."
              (ftype     (gitq--field-type field-tok))
              (next      (car tokens)))
         (cond
-         ;; Bare flag: next token is a boundary, comma, or another field.
-         ;; Only meaningful for flag-typed fields — a bare `where author'
-         ;; used to parse as (author is t), which `is' evaluates as
-         ;; equality against t, silently matching nothing.
+         ;; Bare flag: next token is nil, a comma, another field, or a
+         ;; /terminal.  Only meaningful for flag-typed fields — a bare
+         ;; `where author' used to parse as (author is t), which `is'
+         ;; evaluates as equality against t, silently matching nothing.
          ((or (null next) (equal next ",")
               (member next current-fields)
-              (gitq--flat-boundary-p next))
+              (gitq--flat-terminal-p next))
           (unless (eq ftype 'flag)
             (error "gitq: bare 'where %s' tests a flag, but '%s' is a %s field (add an operator and value)"
                    field-tok field-tok ftype))
           (push (list :field field :op 'is :value t) conditions))
-         ;; Operator present
-         (t
+         ;; Next token is a step keyword: for a flag field this cleanly
+         ;; ends the bare flag test (e.g. `where modified take 5'); for
+         ;; any other field type, a step keyword here is far more
+         ;; likely an unquoted value the user forgot to quote (there is
+         ;; no explicit `contains' keyword to separate field from value
+         ;; anymore, so `where message take' can't tell "end of clause"
+         ;; from "the literal word take" without this check).
+         ((gitq--flat-step-p next)
+          (if (eq ftype 'flag)
+              (push (list :field field :op 'is :value t) conditions)
+            (error
+             "gitq: 'where %s' requires a value; step keyword '%s' must be quoted: \"%s\""
+             field-tok next next)))
+         ;; Recognized operator keyword present
+         ((assoc next gitq--operator-signatures)
           (let* ((op-tok (pop tokens))
                  (op     (intern op-tok))
                  (sig    (assoc op-tok gitq--operator-signatures))
@@ -1438,10 +1504,6 @@ at run time because commit frames have no `:name'."
             ;; runtime surprises (a bogus operator errored only when a
             ;; frame reached it; a type mismatch like `date > ...' was
             ;; silently false forever).
-            (unless sig
-              (error "gitq: unknown where operator '%s' (expected one of: %s)"
-                     op-tok
-                     (mapconcat #'car gitq--operator-signatures ", ")))
             (unless (memq ftype (cdr sig))
               (error "gitq: operator '%s' does not apply to '%s' (a %s field; try: %s)"
                      op-tok field-tok ftype
@@ -1470,19 +1532,29 @@ at run time because commit frames have no `:name'."
              ;; Normal value
              (t
               (let* ((val-tok (pop tokens))
-                     (val     (cond
-                               ((string-prefix-p "\"" val-tok) (gitq--unquote val-tok))
-                               ((string-prefix-p "/" val-tok)  (gitq--unregex val-tok))
-                               ((string-match-p "^[0-9]+$" val-tok)
-                                (string-to-number val-tok))
-                               (t val-tok))))
+                     (val     (gitq--flat-parse-where-value val-tok)))
                 ;; A number-typed field compared with `equal'/arithmetic
                 ;; against a non-numeric value can never match — say so
                 ;; now instead of silently returning nothing.
                 (when (and (eq ftype 'number) (not (numberp val)))
                   (error "gitq: '%s' is a number field; '%s' is not a number"
                          field-tok val-tok))
-                (push (list :field field :op op :value val) conditions))))))))
+                (push (list :field field :op op :value val) conditions))))))
+         ;; No recognized operator, but this field's type is eligible
+         ;; for the implicit `contains' fallback: NEXT is the value
+         ;; directly. (NEXT can never be a step keyword here -- that
+         ;; case was already handled above, uniformly for every field
+         ;; type.)
+         ((memq ftype gitq--implicit-contains-types)
+          (push (list :field field :op 'contains :value (gitq--flat-parse-where-value (pop tokens)))
+                conditions))
+         ;; Otherwise: not a recognized operator, and this field's type
+         ;; (date/number/flag) has no implicit fallback either.
+         (t
+          (let ((op-tok (pop tokens)))
+            (error "gitq: unknown where operator '%s' (expected one of: %s)"
+                   op-tok
+                   (mapconcat #'car gitq--operator-signatures ", "))))))
       (when (equal (car tokens) ",")
         (pop tokens)
         (unless (and tokens (member (car tokens) current-fields))
@@ -1676,20 +1748,29 @@ No pipe character required."
   "Source keywords offered at the start of a pipeline.")
 
 (defconst gitq--complete-morphisms
-  '(".parent" ".parent*" ".parent+" ".parent†" ".tree" ".tree.blobs"
-    ".tree.subtrees" ".tree.entries" ".tree.entries[Blob]"
-    ".tree.entries[Tree]" ".diff" ".diff.hunks" ".diff.lines"
-    ".history" ".commit")
-  "Morphism paths offered after `via'.
-These are the canonical single-morphism forms; dotted compositions
-(`.parent.tree', `.parent[0].diff', ...) are typed by hand and parsed
+  '("parent" "parent*" "parent+" "parent†" "tree" "tree.blobs"
+    "tree.subtrees" "tree.entries" "tree.entries[Blob]"
+    "tree.entries[Tree]" "diff" "diff.hunks" "diff.lines"
+    "history" "commit")
+  "Morphism paths offered after `via'. Bare (no leading dot) -- the dot
+was only ever a tokenizer artifact needed for `*'/`+'/`['/`]'/a second
+`.', and the tokenizer's bare-word class was widened to allow those
+directly (see `gitq--parse-morphism-path'), so it's no longer required;
+the historical dotted spelling (`.parent', ...) is still silently
+accepted by the parser.
+These are the canonical single-morphism forms; compositions
+(`parent.tree', `parent[0].diff', ...) are typed by hand and parsed
 generically by `gitq--parse-morphism-path'.  Consistency with the
 parser and the registry is locked down by tests, not by construction —
 the parser accepts strictly more than this list offers.")
 
 (defconst gitq--complete-where-operators
-  '("==" "!=" ">" "<" ">=" "<=" "contains" "matches" "after" "before" "within" "is")
-  "Operators offered after a field name in a where clause.")
+  '("==" "!=" ">" "<" ">=" "<=" "regex" "after" "before" "within" "is")
+  "Operators offered after a field name in a where clause. There is no
+`contains': a value with no recognized operator between it and the
+field is an implicit substring match instead (for eligible field
+types — see `gitq--implicit-contains-types'), so `gitq--complete-candidates'
+offers value candidates right after a field too, not just this list.")
 
 (defconst gitq--complete-terminals
   (mapcar (lambda (entry) (concat "/" (car entry))) gitq--terminals)
@@ -1730,21 +1811,25 @@ of real commit dates.")
     ("last"    . "keep only the last result")
     ("sort"    . "sort by field (prefix with - for descending)")
     ;; morphisms
-    (".parent"             . "first parent commit")
-    (".parent*"            . "all reachable ancestors, inclusive")
-    (".parent+"            . "all reachable ancestors, exclusive")
-    (".parent†"            . "children-of: commits whose parent is in the result")
-    (".tree"               . "the commit's tree")
-    (".tree.blobs"         . "blob entries in the tree")
-    (".tree.subtrees"      . "subtree entries in the tree")
-    (".tree.entries"       . "all tree entries")
-    (".tree.entries[Blob]" . "blob entries only")
-    (".tree.entries[Tree]" . "subtree entries only")
-    (".diff"               . "paths changed vs. parent (or REF)")
-    (".diff.hunks"         . "line ranges changed vs. parent")
-    (".diff.lines"         . "actual +/- diff lines vs. parent, with content")
-    (".history"            . "commits that touched this path")
-    (".commit"             . "resolve to the referenced commit")
+    ("parent"             . "first parent commit")
+    ("parent*"            . "all reachable ancestors, inclusive")
+    ("parent+"            . "all reachable ancestors, exclusive")
+    ("parent†"            . "children-of: commits whose parent is in the result")
+    ;; "tree" is both the `tree' morphism and the commit-tree-SHA field
+    ;; (dropping the leading dot means the two now share one bare
+    ;; string, same as "path" already did) -- merged description covers
+    ;; both, since this lookup is a flat string match with no context.
+    ("tree"               . "the commit's tree, or (as a field) its SHA")
+    ("tree.blobs"         . "blob entries in the tree")
+    ("tree.subtrees"      . "subtree entries in the tree")
+    ("tree.entries"       . "all tree entries")
+    ("tree.entries[Blob]" . "blob entries only")
+    ("tree.entries[Tree]" . "subtree entries only")
+    ("diff"               . "paths changed vs. parent (or REF)")
+    ("diff.hunks"         . "line ranges changed vs. parent")
+    ("diff.lines"         . "actual +/- diff lines vs. parent, with content")
+    ("history"            . "commits that touched this path")
+    ("commit"             . "resolve to the referenced commit")
     ;; field names
     ("sha"           . "commit SHA")
     ("author"        . "author name")
@@ -1758,7 +1843,7 @@ of real commit dates.")
     ("staged"        . "has staged changes")
     ("untracked"     . "has untracked files")
     ;; field names present on specific frame types only
-    ("tree"        . "commit's tree SHA")
+    ;; ("tree" is described above, alongside the `tree' morphism it collides with)
     ("reftype"     . "ref kind (branch or tag)")
     ("detached"    . "worktree HEAD is detached")
     ("mode"        . "tree entry file mode")
@@ -1836,13 +1921,16 @@ continuing that stage, not a fresh `path' step."
 (defun gitq--complete-where-values (field op)
   "Return completion candidates for a where-condition's value, or nil.
 FIELD is the preceding field token; OP is the where-operator that was
-just typed.  Returns nil (free text, no candidates) for fields with no
-natural, git-derivable value domain: `message' (arbitrary, often
-multi-line text), `parents-count' (an arbitrary integer), and the
-boolean flags `modified'/`staged'/`untracked' (used as bare flags — a
-literal \"true\"/\"false\" string would never actually match, since the
-parser compares values with `equal', so offering either would be
-actively misleading)."
+just typed, or nil when called right after FIELD with no operator yet
+(there is no explicit `contains' keyword, so a value may immediately
+follow a field -- see `gitq--flat-parse-where'). Returns nil (free
+text, no candidates) for fields with no natural, git-derivable value
+domain: `message' (arbitrary, often multi-line text), `parents-count'
+(an arbitrary integer), and the boolean flags
+`modified'/`staged'/`untracked' (used as bare flags — a literal
+\"true\"/\"false\" string would never actually match, since the parser
+compares values with `equal', so offering either would be actively
+misleading)."
   (cond
    ((and (equal field "date") (equal op "within"))
     gitq--complete-date-within-examples)
@@ -1953,10 +2041,12 @@ INPUT is everything typed so far; completions extend the last partial word."
                         (or (null req) (member req fields))))
                     gitq--complete-morphisms)))
 
-     ;; After ".diff" (the one morphism with an optional trailing REF
+     ;; After "diff" (the one morphism with an optional trailing REF
      ;; argument) → offer refs, but also let the user skip straight to
-     ;; a step/terminal since the REF is optional.
-     ((and (equal last-ctx ".diff") (equal prev-ctx "via"))
+     ;; a step/terminal since the REF is optional. Bare "diff" is
+     ;; primary; ".diff" (the old dotted spelling) is still silently
+     ;; accepted by the parser, so it's checked here too.
+     ((and (member last-ctx '("diff" ".diff")) (equal prev-ctx "via"))
       (append (gitq--complete-refs) gitq--flat-step-keywords gitq--complete-terminals))
 
      ;; After "where" or "," (start of another condition) → field names
@@ -1965,17 +2055,21 @@ INPUT is everything typed so far; completions extend the last partial word."
      ((or (equal last-ctx "where") (equal last-ctx ","))
       (gitq--complete--current-type-fields ctx))
 
-     ;; After a field that is part of a `where' clause → where
-     ;; operators.  `sort'/`pick' fields never take one; `path' is also
-     ;; a field name but is excluded from THIS check anyway, since the
-     ;; enclosing-step guard already requires "where" specifically.
-     ;; Validated against the current frame type's fields, not the flat
-     ;; global list, so a hand-typed cross-type field (e.g. `name' after
-     ;; `commits where') doesn't get offered where-operators at all.
+     ;; After a field that is part of a `where' clause → operator
+     ;; keywords *and* value candidates, since there's no explicit
+     ;; `contains' keyword: typing a value directly right here is just
+     ;; as valid as typing an operator first, for fields whose type is
+     ;; implicit-contains-eligible (`where author alice' is
+     ;; `where author contains alice'). `sort'/`pick' fields never take
+     ;; either. Validated against the current frame type's fields, not
+     ;; the flat global list, so a hand-typed cross-type field (e.g.
+     ;; `name' after `commits where') doesn't get offered anything here.
      ((and last-ctx
            (equal (gitq--complete--enclosing-step ctx) "where")
            (member last-ctx (gitq--complete--current-type-fields ctx)))
-      gitq--complete-where-operators)
+      (append gitq--complete-where-operators
+              (when (memq (gitq--field-type last-ctx) gitq--implicit-contains-types)
+                (gitq--complete-where-values last-ctx nil))))
 
      ;; After "sort" → field names (current frame type) with optional
      ;; "-" negation prefix

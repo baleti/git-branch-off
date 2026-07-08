@@ -59,10 +59,10 @@ _gitq() {
   steps=(via where grep pickaxe path pick take skip first last sort in)
   terminals=(/show /copy /insert /count /branch-off /amend /squash
              /reword /remove /delete /commit /stage /mark /worktree)
-  morphisms=(.parent '.parent*' '.parent+' .tree .tree.blobs .tree.subtrees
-             .diff .diff.hunks .history .commit)
-  fields=(.sha .author .email .date .message .path .name .branch .parents-count)
-  operators=(== != '>' '<' '>=' '<=' contains matches after before within is)
+  morphisms=(parent 'parent*' 'parent+' tree tree.blobs tree.subtrees
+             tree.entries diff diff.hunks diff.lines history commit)
+  fields=(sha author email date message path name branch parents-count)
+  operators=(== != '>' '<' '>=' '<=' regex after before within is)
 
   local -a src_cands step_cands term_cands morph_cands field_cands op_cands other_cands
   for c in $candidates; do

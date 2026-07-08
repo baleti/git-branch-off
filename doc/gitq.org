@@ -11,10 +11,10 @@ composing small, typed operations, and end the pipeline with what should
 happen to the result.
 
 #+begin_example
-  commits where author contains "alice" take 5 /show
-  HEAD via .parent* where message contains "fix" /count
+  commits where author alice take 5 /show
+  HEAD via parent* where message "fix" /count
   commits pickaxe "parse-morphism" first /worktree
-  HEAD via .tree.entries.history sort -date first /copy
+  HEAD via tree.entries.history sort -date first /copy
 #+end_example
 
 (Worked examples with real captured outputs live in [[file:examples.org][examples.org]].)
@@ -23,8 +23,12 @@ The syntax borrows deliberately:
 
 - from *PRQL*: a pipeline is a flat sequence of stages read left to right,
   each refining the previous one — no nesting, no subqueries.
-- from *jq*: dotted paths (=.parent=, =.tree.entries[Blob]=) navigate a tree
-  of structured data; =/regex/= literals filter it.
+- from *jq*: paths (=parent=, =tree.entries[Blob]=) navigate a tree of
+  structured data; =/regex/= literals filter it.  (The historical
+  leading-dot spelling, =.parent=, =.tree.entries[Blob]=, still parses
+  identically — the dot was only ever needed to get =*=/=+=/=[=/=]=/a second
+  =.= into one token, and the tokenizer's bare-word class was widened to
+  allow those directly, so it's no longer required.)
 - from *SQL*: =where=, =sort=, and projection (=pick=) keep their familiar
   relational meaning.
 - from *category theory*: the parts below that make the whole thing
@@ -39,13 +43,13 @@ records.  A frame's *shape* is the set of fields it carries:
 
 | Shape      | Fields                                                     | Produced by                       |
 |------------+------------------------------------------------------------+-----------------------------------|
-| commit     | sha author email date message tree parents-count           | =commits=, =HEAD=, =.parent=, =.history=, =.commit= |
+| commit     | sha author email date message tree parents-count           | =commits=, =HEAD=, =parent=, =history=, =commit= |
 | ref        | sha name reftype                                           | =branches=, =tags=, =refs=        |
 | worktree   | path sha branch detached modified staged untracked         | =worktrees=                       |
-| blob entry | sha path mode                                              | =blobs=, =.tree.entries=          |
-| tree object| sha                                                        | =.tree=                           |
-| diff       | sha path parent-sha                                        | =.diff=                           |
-| hunk       | path start-line end-line commit-sha                        | =.diff.hunks=                     |
+| blob entry | sha path mode                                              | =blobs=, =tree.entries=           |
+| tree object| sha                                                        | =tree=                            |
+| diff       | sha path parent-sha                                        | =diff=                            |
+| hunk       | path start-line end-line commit-sha                        | =diff.hunks=                      |
 | line       | sha path line-number content commit-sha                    | =grep=                            |
 
 Shapes are identified *structurally* (by field-set), not nominally: two
@@ -65,20 +69,22 @@ path was touched by many commits.  Each morphism is registered
 - =:exec= — its implementation.
 
 Because every morphism's output is the same kind of thing as its input (a
-frame list), morphisms compose generically: =via .parent.tree= is =.parent=
-then =.tree=, and =via .parent[0].diff main= or =.tree.entries.history= work
+frame list), morphisms compose generically: =via parent.tree= is =parent=
+then =tree=, and =via parent[0].diff main= or =tree.entries.history= work
 without any of those combinations being special-cased.  Execution lifts the
 one-frame map pointwise over the incoming list and appends the results —
 composition in the Kleisli category of the list monad, which is precisely why
 chaining needs no plumbing.
 
-=.parent†= is the *adjoint* of =.parent=: instead of "the commits this one
+=parent†= is the *adjoint* of =parent=: instead of "the commits this one
 points to", "the commits that point to this one" (children-of).
 
-The dotted path is parsed by greedy longest-match against surface forms
-(=gitq--morphism-forms=), so the fused forms (=.tree.entries=, =.diff.hunks=)
+The path is parsed by greedy longest-match against surface forms
+(=gitq--morphism-forms=), so the fused forms (=tree.entries=, =diff.hunks=)
 remain single efficient morphisms while still reading — and type-checking —
-exactly as their name says.
+exactly as their name says.  Written with the leading dot instead
+(=.parent.tree=, =.tree.entries=, ...), it's normalized to the same form
+before matching — see =gitq--parse-morphism-path=.
 
 ** Relational steps
 
@@ -87,6 +93,16 @@ frame list without changing what kind of graph object it describes; =grep=
 and =pickaxe= search content and produce line frames / filter commits.
 These are the PRQL/SQL-flavored part of the language and are shape-checked
 like everything else.
+
+=where= has no explicit =contains= keyword.  A value right after a field
+with no recognized operator between them (=gitq--operator-signatures=: =====,
+=!==, =>=, =<=, =>==, =<==, =regex=, =after=, =before=, =within=, =is=) is an
+implicit substring match, for field types where that's meaningful (string,
+sha) — =where author alice= means "author contains alice", not "equals",
+since bare equality would need =where author == alice= explicitly.
+Date/number/flag fields have no such fallback: an unrecognized token there
+is still an unknown-operator parse error, same as a genuinely bad operator
+keyword.
 
 ** Terminals
 
@@ -108,7 +124,7 @@ Typing happens at *parse time*, in two layers:
 1. *Structural field-sets.*  The parser threads the current shape's
    field-set through every stage.  A =where=/=sort=/=pick= referencing a
    field the current shape doesn't carry, or a morphism whose =:requires=
-   is missing (=branches via .tree= — ref frames have no tree), is an
+   is missing (=branches via tree= — ref frames have no tree), is an
    immediate error naming the fields the frame actually has.  Morphism
    chains fold this check segment by segment.
 
@@ -158,12 +174,14 @@ parseable morphism must be executable, every field must have a scalar type.
 - =/squash= is a stub that reports what it would do; use
   =git-branch-off-squash= for the real operation.
 - A standalone =path GLOB= step cannot directly follow a =where= clause on a
-  path-carrying shape — =path= chains as a where-field there.  Put the
-  =path= step first, or use =where path matches ...=.  (This is inherent to
-  =path= being both a field and a step keyword; it errors loudly.)
+  path-carrying shape — =path= chains as a where-field there instead, e.g.
+  =where modified path "*.el"= means "modified is true AND path contains the
+  literal substring *.el", not a glob filter.  Put the =path= step first, or
+  use =where path regex /\.el$/= for pattern matching.  (This is inherent to
+  =path= being both a field and a step keyword.)
 - Date comparison is lexical over git's ISO-8601 =%ai= format, which is
   chronological within a timezone but not across mixed-timezone histories.
-- =.diff.hunks= is fused; there is no standalone =.hunks= morphism on diff
+- =diff.hunks= is fused; there is no standalone =hunks= morphism on diff
   frames yet.
 
 * File Map
