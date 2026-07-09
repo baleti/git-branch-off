@@ -76,9 +76,6 @@ echo ""
   --eval "(require 'ert)" \
   -l "$REPO_DIR/git-branch-off-stage.el" \
   -l "$SCRIPT_DIR/git-branch-off-test.el" \
-  -l "$REPO_DIR/git-branch-off-gitq.el" \
-  -l "$SCRIPT_DIR/git-branch-off-gitq-test.el" \
-  -l "$SCRIPT_DIR/git-branch-off-gitq-flat-test.el" \
   -l "$REPO_DIR/git-branch-off-search.el" \
   -l "$SCRIPT_DIR/git-branch-off-search-test.el" \
   --eval "(ert-run-tests-batch-and-exit '$ERT_SELECTOR)"

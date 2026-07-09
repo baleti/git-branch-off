@@ -49,7 +49,6 @@
 (require 'git-branch-off-squash)
 (require 'git-branch-off-blob)
 (require 'git-branch-off-search)
-(require 'git-branch-off-gitq)
 
 (defun git-branch-off--setup-transients ()
   "Add git-branch-off entries to magit's rebase and merge transients."

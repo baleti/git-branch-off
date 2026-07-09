@@ -178,41 +178,16 @@ result would be filtered out by =completing-read= itself before it ever
 reaches the list, even though the search found matches. This is the same
 requirement Consult itself documents for its own grep-style commands.
 
-** GitQ — query language
+** GitQ — query language (moved)
 
-=M-x gitq= reads a pipeline query over git's object graph — one language for
-the tasks that would otherwise each need their own command:
+GitQ — the typed, categorical pipeline query language over git's object
+graph that began life in this package — now lives in its own repository as
+a standalone Haskell CLI with Emacs and zsh integrations:
+https://github.com/baleti/gitq
 
-#+begin_example
-  commits where author alice take 5 /show
-  HEAD via parent* where message "fix" /count
-  commits pickaxe "some-function" first /worktree
-  HEAD via tree.entries.history sort -date first /copy
-#+end_example
-
-A pipeline is =source [step...] [/terminal]=: a source produces typed frames
-(=commits=, =branches=, =worktrees=, =blobs=, =HEAD=, any ref), steps
-transform them (=via= morphism paths like =parent[0].tree.entries[Blob]=
-compose and type-check segment by segment — the historical leading-dot
-spelling, e.g. =.parent[0]=, still works too; =where= / =sort= / =pick= /
-=take= / =grep= / =pickaxe= behave as their SQL/PRQL/jq counterparts), and a
-=/terminal= acts on the result (=/show= =/copy= =/count= =/branch-off=
-=/reword= =/remove= =/worktree= ...).
-
-Everything is validated at parse time against the frame shape actually
-flowing through the pipeline — unknown fields, operators that don't fit a
-field's type, or morphisms applied to the wrong object are immediate,
-specific errors, not empty results.  There is no explicit =contains=
-keyword: a value right after a field with no recognized operator between
-them is an implicit substring match (=where author alice=), for field types
-where that makes sense.  The minibuffer completes each token contextually
-(with live preview of results as you type), and a standalone =bin/gitq= CLI
-plus zsh completion ship in the repo.
-
-The full design — the typed categorical model, grammar, and extension guide —
-is documented in [[file:doc/gitq.org][doc/gitq.org]]; [[file:doc/examples.org][doc/examples.org]] is a set of worked examples
-with real captured outputs, including the pickaxe + =diff.lines= workflow
-for seeing matched diff content in the results buffer.
+The Emacs front-end (=M-x gitq=, contextual completion, live preview,
+results buffer) installs from that repo's =integrations/emacs/= — see its
+README for the straight.el recipe.
 
 * Installation
 
